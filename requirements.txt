@@ -1,0 +1,5 @@
+streamlit
+pdfplumber
+sentence-transformers
+faiss-cpu
+openai
