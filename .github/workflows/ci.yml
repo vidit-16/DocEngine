@@ -33,7 +33,7 @@ jobs:
         run: pytest
 
       - name: Lint
-        run: ruff check src tests app.py
+        run: ruff check src tests app.py evaluation
 
   hygiene:
     name: Repository hygiene
@@ -58,6 +58,21 @@ jobs:
             echo "A credential-shaped string is committed."
             exit 1
           fi
+
+      - name: The gold set is valid JSON with the required fields
+        run: |
+          python - <<'CHECK'
+          import json, pathlib, sys
+          for line in pathlib.Path("evaluation/questions.jsonl").read_text().splitlines():
+              if not line.strip():
+                  continue
+              q = json.loads(line)
+              missing = {"id", "question", "evidence", "pages"} - set(q)
+              if missing:
+                  sys.exit(f"{q.get('id', '?')}: missing {missing}")
+              if not q["evidence"]:
+                  sys.exit(f"{q['id']}: no evidence strings")
+          CHECK
 
       - name: The embedding model is not loaded at import
         run: |

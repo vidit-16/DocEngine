@@ -1,0 +1,20 @@
+{"id": "q01", "question": "What are the recommended default hyperparameter values for Adam?", "evidence": ["Good default settings"], "pages": [2]}
+{"id": "q02", "question": "What regret bound does the convergence analysis prove?", "evidence": ["regret bound"], "pages": [4, 14, 15]}
+{"id": "q03", "question": "How does Adam relate to RMSProp?", "evidence": ["RMSProp"], "pages": [5]}
+{"id": "q04", "question": "Why is the Sum-of-Functions Optimizer impractical on a GPU?", "evidence": ["Sum-of-Functions Optimizer"], "pages": [5]}
+{"id": "q05", "question": "What does bounding the step size by alpha establish around the current parameters?", "evidence": ["trust region"], "pages": [3]}
+{"id": "q06", "question": "What is AdaMax?", "evidence": ["AdaMax"], "pages": [9, 10]}
+{"id": "q07", "question": "Which norm does the AdaMax variant use?", "evidence": ["infinity norm"], "pages": [9]}
+{"id": "q08", "question": "Why are the moment estimates biased towards zero initially?", "evidence": ["initialization bias"], "pages": [3]}
+{"id": "q09", "question": "Whose online learning framework is the convergence analysis based on?", "evidence": ["Zinkevich"], "pages": [4]}
+{"id": "q10", "question": "What results are reported on CIFAR-10?", "evidence": ["CIFAR"], "pages": [7]}
+{"id": "q11", "question": "How was dropout used in the experiments?", "evidence": ["dropout"], "pages": [6, 7]}
+{"id": "q12", "question": "How does Adam compare against SGD with Nesterov momentum?", "evidence": ["Nesterov"], "pages": [6, 7]}
+{"id": "q13", "question": "What does the name Adam stand for?", "evidence": ["adaptive moment estimation"], "pages": [1]}
+{"id": "q14", "question": "How are the moment estimates accumulated over time?", "evidence": ["exponential moving average"], "pages": [2, 3]}
+{"id": "q15", "question": "What architecture was used for the multi-layer neural network experiment?", "evidence": ["multi-layer neural network"], "pages": [6]}
+{"id": "q16", "question": "How does Adam behave when gradients are sparse?", "evidence": ["sparse gradients"], "pages": [3, 5, 8]}
+{"id": "q17", "question": "What is temporal averaging?", "evidence": ["temporal averaging"], "pages": [9]}
+{"id": "q18", "question": "Which dataset was used for the logistic regression experiment?", "evidence": ["MNIST"], "pages": [6, 7]}
+{"id": "q19", "question": "What convolutional network experiment was run?", "evidence": ["convolutional"], "pages": [7]}
+{"id": "q20", "question": "How does Adam compare to AdaGrad on sparse features?", "evidence": ["AdaGrad"], "pages": [5, 6, 7]}

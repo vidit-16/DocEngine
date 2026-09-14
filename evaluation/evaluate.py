@@ -1,0 +1,228 @@
+"""Measure retrieval quality against a labelled question set.
+
+Every question carries evidence strings that are known to appear in the
+document. A retrieval counts as a hit when one of the returned chunks actually
+contains that evidence. That makes the labels self-checking: the harness
+verifies at load time that every evidence string is present somewhere in the
+extracted text, and refuses to run if one is not. A gold set that has silently
+drifted from the document is worse than no gold set.
+
+Three configurations are measured:
+
+  legacy    the retriever as it shipped before the rewrite
+  keyword   the new keyword ranking alone, no embeddings
+  hybrid    keyword and semantic rankings fused (what the app uses)
+
+Usage:
+
+    pip install -r requirements.txt
+    python evaluation/evaluate.py
+
+The document is downloaded once and cached under evaluation/.cache/.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from evaluation.legacy import legacy_search  # noqa: E402
+from src.chunker import Chunk, chunk_pages  # noqa: E402
+from src.loader import load_pdf  # noqa: E402
+from src.retriever import search  # noqa: E402
+
+# Kingma & Ba, "Adam: A Method for Stochastic Optimization" (ICLR 2015).
+# Chosen because it is single-column with a clean text layer: a two-column
+# paper would measure pdfplumber's column handling rather than retrieval.
+DOCUMENT_URL = "https://arxiv.org/pdf/1412.6980"
+CACHE = Path(__file__).parent / ".cache" / "adam.pdf"
+QUESTIONS = Path(__file__).parent / "questions.jsonl"
+
+K_VALUES = (1, 3, 5)
+
+
+def fetch_document() -> bytes:
+    if CACHE.exists():
+        return CACHE.read_bytes()
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    print(f"downloading {DOCUMENT_URL}")
+    with urllib.request.urlopen(DOCUMENT_URL) as response:
+        data = response.read()
+    CACHE.write_bytes(data)
+    return data
+
+
+def load_questions(chunks: list[Chunk]) -> list[dict]:
+    """Load the gold set, refusing any label the document does not support."""
+    document = " ".join(chunk.text for chunk in chunks).lower()
+
+    questions = []
+    for line in QUESTIONS.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        question = json.loads(line)
+        for evidence in question["evidence"]:
+            if evidence.lower() not in document:
+                raise SystemExit(
+                    f"{question['id']}: evidence {evidence!r} is not in the document. "
+                    "The gold set and the document have diverged."
+                )
+        questions.append(question)
+    return questions
+
+
+def is_hit(chunk: Chunk, question: dict) -> bool:
+    text = chunk.text.lower()
+    return any(evidence.lower() in text for evidence in question["evidence"])
+
+
+def score(retrieved: list[Chunk], question: dict) -> dict:
+    """Recall at each k, reciprocal rank, and whether the page was right."""
+    ranks = [position for position, chunk in enumerate(retrieved, start=1)
+             if is_hit(chunk, question)]
+
+    result = {f"recall@{k}": float(any(r <= k for r in ranks)) for k in K_VALUES}
+    result["mrr"] = 1.0 / ranks[0] if ranks else 0.0
+    result["page@1"] = float(
+        bool(retrieved) and retrieved[0].page in question["pages"]
+    )
+    return result
+
+
+def evaluate(name, retrieve, chunks, questions, verbose=False) -> dict:
+    per_question = []
+    for question in questions:
+        retrieved = retrieve(question["question"], chunks)
+        outcome = score(retrieved, question)
+        per_question.append(outcome)
+        if verbose:
+            mark = "hit " if outcome["recall@5"] else "MISS"
+            print(f"  {mark} {question['id']} {question['question'][:58]}")
+
+    metrics = {
+        key: statistics.mean(entry[key] for entry in per_question)
+        for key in per_question[0]
+    }
+    metrics["questions"] = len(questions)
+    metrics["name"] = name
+    return metrics
+
+
+def build_retrievers(chunks: list[Chunk], skip_semantic: bool):
+    retrievers = [
+        ("legacy", lambda q, c: legacy_search(q, c, k=5)),
+        ("keyword", lambda q, c: [r.chunk for r in search(q, c, index=None, k=5)]),
+    ]
+    if skip_semantic:
+        return retrievers
+
+    from src.embedder import embed
+    from src.vector_store import create_index
+
+    print("embedding chunks...")
+    index = create_index(embed([chunk.text for chunk in chunks]))
+    retrievers.append(
+        ("hybrid", lambda q, c: [r.chunk for r in search(q, c, index=index, k=5)])
+    )
+    return retrievers
+
+
+def write_report(results: list[dict], chunks: list[Chunk], pages: int, path: Path) -> None:
+    header = "| Retriever | " + " | ".join(f"Recall@{k}" for k in K_VALUES)
+    header += " | MRR | Page@1 |"
+
+    lines = [
+        "# Retrieval evaluation",
+        "",
+        f"Generated by `evaluation/evaluate.py` on "
+        f"{datetime.now(timezone.utc).date().isoformat()}.",
+        "",
+        "## Setup",
+        "",
+        f"- Document: Kingma & Ba, *Adam: A Method for Stochastic Optimization* "
+        f"({pages} pages, {len(chunks)} chunks)",
+        f"- Questions: {results[0]['questions']}, each labelled with evidence text "
+        "verified to exist in the document",
+        "- A retrieval counts as a hit when a returned chunk contains that evidence",
+        "",
+        "## Results",
+        "",
+        header,
+        "| --- | " + " | ".join("---" for _ in K_VALUES) + " | --- | --- |",
+    ]
+
+    for row in results:
+        cells = " | ".join(f"{row[f'recall@{k}']:.2f}" for k in K_VALUES)
+        lines.append(
+            f"| {row['name']} | {cells} | {row['mrr']:.3f} | {row['page@1']:.2f} |"
+        )
+
+    lines += [
+        "",
+        "## What the rows mean",
+        "",
+        "- **legacy** — the retriever as it shipped before the rewrite, kept "
+        "verbatim in `evaluation/legacy.py`",
+        "- **keyword** — the new keyword ranking alone, with no embeddings",
+        "- **hybrid** — keyword and semantic rankings fused, which is what the app uses",
+        "",
+        "## Limits of these numbers",
+        "",
+        "- One document, 20 questions. Enough to catch a retriever that ignores "
+        "the query; not enough to rank two good retrievers apart with confidence.",
+        "- Relevance is approximated by an evidence substring appearing in a "
+        "retrieved chunk. A chunk can contain the phrase without answering the "
+        "question, so recall here is an upper bound on usefulness.",
+        "- Questions were written against this document with its contents in "
+        "view, which is a mild optimistic bias.",
+        "- Page@1 is strict: a correct answer split across a page boundary can "
+        "be retrieved usefully and still score zero.",
+        "- End-to-end answer quality is not measured. This scores retrieval "
+        "only, which is the half that was broken.",
+        "",
+        "Regenerate with `python evaluation/evaluate.py`.",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--verbose", action="store_true", help="Show per-question outcomes")
+    parser.add_argument(
+        "--skip-semantic",
+        action="store_true",
+        help="Measure legacy and keyword only, without loading an embedding model",
+    )
+    parser.add_argument("--output", default=str(Path(__file__).parent / "RESULTS.md"))
+    args = parser.parse_args()
+
+    pages = load_pdf(fetch_document())
+    chunks = chunk_pages(pages)
+    questions = load_questions(chunks)
+    print(f"{len(pages)} pages, {len(chunks)} chunks, {len(questions)} questions\n")
+
+    results = []
+    for name, retrieve in build_retrievers(chunks, args.skip_semantic):
+        print(f"{name}:")
+        metrics = evaluate(name, retrieve, chunks, questions, args.verbose)
+        results.append(metrics)
+        print(
+            "  "
+            + "  ".join(f"recall@{k}={metrics[f'recall@{k}']:.2f}" for k in K_VALUES)
+            + f"  mrr={metrics['mrr']:.3f}  page@1={metrics['page@1']:.2f}\n"
+        )
+
+    write_report(results, chunks, len(pages), Path(args.output))
+    print(f"wrote {args.output}")
+
+
+if __name__ == "__main__":
+    main()

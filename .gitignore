@@ -16,6 +16,7 @@ venv/
 
 # Model and index caches
 .cache/
+evaluation/.cache/
 *.faiss
 
 # Editors and OS

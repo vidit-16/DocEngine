@@ -96,7 +96,7 @@ def test_a_pdf_with_no_text_raises_rather_than_returning_empty(monkeypatch):
     import src.loader as loader
 
     class FakePage:
-        def extract_text(self):
+        def extract_text(self, **kwargs):
             return None
 
     class FakePDF:
@@ -122,7 +122,7 @@ def test_pages_without_text_are_skipped_but_numbering_is_preserved(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-        def extract_text(self):
+        def extract_text(self, **kwargs):
             return self.text
 
     class FakePDF:
@@ -138,3 +138,34 @@ def test_pages_without_text_are_skipped_but_numbering_is_preserved(monkeypatch):
 
     result = loader.load_pdf(b"pdf")
     assert [page.number for page in result] == [1, 3]
+
+
+def test_the_space_tolerance_is_passed_to_pdfplumber(monkeypatch):
+    """pdfplumber's default x_tolerance glues words together in academic PDFs.
+
+    Measured across five arXiv papers, the default of 3 lost between 23% and
+    65% of word tokens. This pins the narrower value in place.
+    """
+    import src.loader as loader
+
+    seen = {}
+
+    class FakePage:
+        def extract_text(self, **kwargs):
+            seen.update(kwargs)
+            return "some text"
+
+    class FakePDF:
+        pages = [FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(loader.pdfplumber, "open", lambda _: FakePDF())
+    loader.load_pdf(b"pdf")
+
+    assert seen["x_tolerance"] == loader.X_TOLERANCE
+    assert loader.X_TOLERANCE < 3, "the pdfplumber default is what caused glued words"

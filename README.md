@@ -45,6 +45,20 @@ on rises to the top, while a chunk only one of them is confident about can still
 surface. RRF fuses *rankings* rather than scores, which avoids having to invent
 a common scale for a keyword weight and a cosine similarity.
 
+### Measured effect
+
+| Retriever | Recall@1 | Recall@3 | Recall@5 | MRR | Page@1 |
+| --- | --- | --- | --- | --- | --- |
+| legacy | 0.00 | 0.10 | 0.20 | 0.067 | 0.05 |
+| keyword only | 0.75 | 0.95 | 1.00 | 0.852 | 0.40 |
+| hybrid | **0.80** | **1.00** | **1.00** | **0.892** | **0.55** |
+
+20 labelled questions against a 15-page paper, 130 chunks. The old retriever
+never once ranked the right passage first. Method, caveats and the command to
+reproduce are in [`evaluation/RESULTS.md`](evaluation/RESULTS.md); the old
+retriever is kept verbatim in `evaluation/legacy.py` so the comparison can be
+re-run rather than taken on trust.
+
 ### The bug this replaced
 
 An earlier version was keyword-first with a shortcut:
@@ -75,6 +89,18 @@ generation: a bad retriever behind a good model looks fine until you check.
 `tests/test_retriever.py` pins the fixed behaviour, including a case for each
 symptom above.
 
+## Text extraction
+
+pdfplumber inserts a space when the gap between two characters exceeds
+`x_tolerance`, which defaults to 3 points. That is too wide for the Type 1 fonts
+most academic PDFs use: narrow spaces fall below the threshold and words arrive
+glued together, as `theencoderiscomposedof`.
+
+Measured across five arXiv papers, dropping to 1.5 recovers **30% to 182% more
+word tokens** and removes glued tokens entirely. On the Transformer paper the
+old setting was surfacing about a third of the document's words, which a keyword
+retriever cannot recover from. Override with `DOCENGINE_X_TOLERANCE`.
+
 ## Citations
 
 Chunks carry the page they came from, passages reach the model labelled
@@ -90,6 +116,19 @@ streamlit run app.py
 ```
 
 The model name can be overridden with `DOCENGINE_MODEL`.
+
+## Evaluation
+
+```bash
+python evaluation/evaluate.py
+```
+
+Downloads the reference paper, runs all three retrievers over the labelled
+question set, and rewrites `evaluation/RESULTS.md`. Labels are self-checking:
+the harness verifies every evidence string is present in the extracted text and
+refuses to run if the gold set and the document have drifted apart.
+
+`--skip-semantic` measures legacy and keyword only, without loading a model.
 
 ## Tests
 
@@ -131,9 +170,11 @@ stubbing.
 - Scanned PDFs with no text layer are rejected rather than OCR'd.
 - The index is rebuilt per upload and held in memory; there is no persistence
   across sessions.
-- Retrieval quality is pinned by unit tests on a synthetic corpus, not measured
-  against a labelled question set. A small evaluation set would turn "the tests
-  pass" into a number.
+- The evaluation is one document and 20 questions. Enough to catch a retriever
+  that ignores the query, not enough to separate two good ones with confidence.
+- Relevance is approximated by an evidence substring appearing in a retrieved
+  chunk, so recall is an upper bound on usefulness.
+- Answer quality is not measured, only retrieval — the half that was broken.
 
 ## License
 

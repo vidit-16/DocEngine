@@ -8,9 +8,18 @@ together there is no way to recover which page an answer came from.
 from __future__ import annotations
 
 import io
+import os
 from dataclasses import dataclass
 
 import pdfplumber
+
+# pdfplumber inserts a space when the gap between two characters exceeds this
+# many points. The library default of 3 is too wide for the Type 1 fonts most
+# academic PDFs use: narrow spaces fall under the threshold and words come out
+# glued together ("theencoderiscomposedof"). Measured across five arXiv papers,
+# dropping to 1.5 recovers between 30% and 182% more word tokens and eliminates
+# glued tokens entirely, without splitting words apart.
+X_TOLERANCE = float(os.getenv("DOCENGINE_X_TOLERANCE", "1.5"))
 
 
 @dataclass(frozen=True)
@@ -33,7 +42,7 @@ def load_pdf(file_bytes: bytes) -> list[Page]:
     pages: list[Page] = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for number, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text()
+            text = page.extract_text(x_tolerance=X_TOLERANCE)
             if text and text.strip():
                 pages.append(Page(number=number, text=text))
 
