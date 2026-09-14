@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # requirements-test.txt, not requirements-dev.txt: the suite stubs the
+      # embedding model and the OpenAI client, so torch is never needed here.
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+
+      # No OPENAI_API_KEY is set. A test that starts reaching for the network
+      # fails here rather than in front of a user.
+      - name: Tests
+        run: pytest
+
+      - name: Lint
+        run: ruff check src tests app.py evaluation
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No compiled bytecode is committed
+        run: |
+          if git ls-files | grep -E '(\.pyc$|__pycache__/)'; then
+            echo "Compiled bytecode must not be committed; .gitignore covers it."
+            exit 1
+          fi
+
+      - name: No .env or API keys in tracked files
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo ".env must never be committed."
+            exit 1
+          fi
+          if git grep -nIE '(sk-[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{20,})' -- . ':!*.md'; then
+            echo "A credential-shaped string is committed."
+            exit 1
+          fi
+
+      - name: The gold sets are valid JSON with the required fields
+        run: |
+          python - <<'CHECK'
+          import json, pathlib, sys
+          lines = []
+          for name in ("questions.jsonl", "questions_hard.jsonl"):
+              lines += pathlib.Path("evaluation") .joinpath(name).read_text().splitlines()
+          for line in lines:
+              if not line.strip():
+                  continue
+              q = json.loads(line)
+              missing = {"id", "question", "evidence", "pages"} - set(q)
+              if missing:
+                  sys.exit(f"{q.get('id', '?')}: missing {missing}")
+              if not q["evidence"]:
+                  sys.exit(f"{q['id']}: no evidence strings")
+          CHECK
+
+      - name: The embedding model is not loaded at import
+        run: |
+          pip install numpy
+          python -c "
+          import src.embedder as e
+          assert e._model is None, 'importing src.embedder loaded the model'
+          "

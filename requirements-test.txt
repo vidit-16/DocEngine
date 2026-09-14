@@ -1,0 +1,11 @@
+# What the test suite actually needs.
+#
+# Deliberately excludes sentence-transformers, torch and streamlit: no test
+# loads an embedding model or renders the UI, so CI installs about 50MB instead
+# of roughly 2GB. If a test ever starts needing them, that is a signal the test
+# has grown a dependency on something it should be stubbing.
+pdfplumber>=0.10,<1.0
+faiss-cpu>=1.7,<2.0
+numpy>=1.26,<3.0
+pytest>=8.0,<9.0
+ruff>=0.4,<1.0

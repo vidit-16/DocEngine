@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
+
+# Local PDFs used for manual testing
+*.pdf
+!tests/fixtures/*.pdf
+
+# Model and index caches
+.cache/
+evaluation/.cache/
+*.faiss
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
