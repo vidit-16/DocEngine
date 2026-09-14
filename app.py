@@ -1,64 +1,69 @@
 import streamlit as st
-from src.loader import load_pdf
-from src.chunker import chunk_text
-from src.embedder import get_embeddings, model
-from src.vector_store import create_index
+
+from src.chunker import chunk_pages
+from src.embedder import embed
+from src.llm import AnswerError, generate_answer
+from src.loader import EmptyDocumentError, load_pdf
 from src.retriever import search
-from src.llm import generate_answer
+from src.vector_store import create_index
 
 st.set_page_config(page_title="Document Q&A Engine", layout="wide")
 st.title("📄 Document Q&A Engine")
 
-# ------------------------
-# Session state
-# ------------------------
-if "last_results" not in st.session_state:
-    st.session_state.last_results = []
 
-# ------------------------
-# Upload PDF
-# ------------------------
+@st.cache_resource(show_spinner=False)
+def build_pipeline(file_bytes: bytes):
+    """Parse, chunk and index a PDF. Cached so re-asking does not re-embed."""
+    pages = load_pdf(file_bytes)
+    chunks = chunk_pages(pages)
+    index = create_index(embed([chunk.text for chunk in chunks]))
+    return pages, chunks, index
+
+
 uploaded = st.file_uploader("Upload PDF", type=["pdf"])
 
 if uploaded:
     file_bytes = uploaded.read()
 
-    # Process PDF
-    with st.spinner("Processing PDF..."):
-        text = load_pdf(file_bytes)
-        chunks = chunk_text(text)
-        embeddings = get_embeddings(chunks)
-        index = create_index(embeddings)
+    try:
+        with st.spinner("Reading and indexing the document..."):
+            pages, chunks, index = build_pipeline(file_bytes)
+    except EmptyDocumentError as exc:
+        st.error(str(exc))
+        st.stop()
 
-    st.success("PDF ready!")
+    st.success(f"Indexed {len(chunks)} passages across {len(pages)} pages.")
 
-    # ------------------------
-    # Query input
-    # ------------------------
     query = st.text_input("Ask a question")
 
     if query:
-        with st.spinner("Thinking..."):
-            results = search(query, model, index, chunks)
+        with st.spinner("Retrieving..."):
+            results = search(query, chunks, index=index, k=5)
 
-            # Use top chunks as context
-            context = "\n\n".join(results[:3])
+        if not results:
+            st.warning("Nothing in the document matched that question.")
+            st.stop()
 
-            answer = generate_answer(query, context)
+        try:
+            with st.spinner("Answering..."):
+                answer = generate_answer(query, results[:3])
+        except AnswerError as exc:
+            st.error(str(exc))
+            st.stop()
 
-        # Save results for sources
-        st.session_state.last_results = results
-
-        # ------------------------
-        # Show Answer
-        # ------------------------
         st.write("### Answer")
         st.write(answer)
 
-        # ------------------------
-        # Show Sources (clean + optional)
-        # ------------------------
-        if st.checkbox("📚 Show Sources"):
-            for i, chunk in enumerate(st.session_state.last_results[:2]):
-                clean = chunk.replace("\n", " ").strip()
-                st.markdown(f"**{i+1}.** {clean[:250]}...")
+        with st.expander(f"📚 Passages used ({len(results)} retrieved)"):
+            for position, item in enumerate(results, start=1):
+                matched_by = []
+                if item.keyword_rank:
+                    matched_by.append(f"keyword #{item.keyword_rank}")
+                if item.semantic_rank:
+                    matched_by.append(f"semantic #{item.semantic_rank}")
+
+                st.markdown(
+                    f"**{position}. Page {item.chunk.page}** "
+                    f"· {', '.join(matched_by)} · score {item.score:.4f}"
+                )
+                st.caption(item.chunk.text[:400] + ("..." if len(item.chunk.text) > 400 else ""))

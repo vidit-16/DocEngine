@@ -1,124 +1,140 @@
 # Document Q&A Engine
 
-**Upload a PDF, ask a question, and get an answer grounded in the document.**
+**Upload a PDF, ask a question, get an answer grounded in the document — with the page it came from.**
 
-DocEngine is a small Retrieval-Augmented Generation system built around a simple idea: retrieve relevant parts of a document first, then give those passages to an LLM as the only context it can use to answer.
+DocEngine is a small Retrieval-Augmented Generation system built around one idea:
+retrieve the relevant parts of a document first, then let the model answer using
+only those passages.
 
-There is a live Streamlit demo:
+Live demo: https://doc--engine.streamlit.app/
 
-https://doc--engine.streamlit.app/
-
----
-
-## What it actually does
-
-A PDF moves through five stages:
+## The pipeline
 
 ```text
 PDF
+ ↓  pdfplumber, page by page
+pages
+ ↓  400-char chunks, 50-char overlap, never crossing a page boundary
+chunks (each tagged with its page)
+ ↓  MiniLM embeddings, L2-normalised
+FAISS inner-product index
  ↓
-pdfplumber text extraction
+hybrid retrieval: keyword ranking + semantic ranking, fused
  ↓
-400-character chunks with 50-character overlap
- ↓
-SentenceTransformer embeddings
- ↓
-FAISS vector index
- ↓
-retrieval + LLM answer generation
+top passages → gpt-4o-mini, answering only from them, citing pages
 ```
 
-The current retriever is deliberately hybrid rather than purely semantic. It first checks for chunks containing words from the query. When at least three keyword matches are available, those are returned. Otherwise it falls back to vector search with FAISS.
+## Retrieval
 
-The answer stage then joins the top three retrieved chunks and sends them to `gpt-4o-mini` with an explicit instruction to answer **only from the supplied context**. When the context is not enough, the prompt asks the model to say that the answer was not clearly found in the document.
+This is the part of the system that decides what the model is allowed to see, so
+it is the part worth explaining.
 
-## Why the retrieval layer matters
+Two strategies run on every query.
 
-The LLM is not given the whole PDF. The system first narrows the document down to a small context window, which makes the answer generation stage simpler and keeps the source material visible in the pipeline.
+**Keyword.** The query is tokenised: lowercased, punctuation stripped, stopwords
+removed, numbers kept. Chunks are scored by how much of the query's content
+vocabulary they contain, weighted so that a rare term counts for more than a
+common one, and scaled by what fraction of the query the chunk covers.
 
-That also makes the main failure mode explicit: **bad retrieval leads to bad answers**. The quality of chunking and matching matters just as much as the final generation step.
+**Semantic.** The query is embedded and matched against the FAISS index by
+cosine similarity.
 
-## Sources
+The two rankings are then combined with Reciprocal Rank Fusion: each strategy
+contributes `1 / (60 + rank)` to the chunks it ranks highly. A chunk both agree
+on rises to the top, while a chunk only one of them is confident about can still
+surface. RRF fuses *rankings* rather than scores, which avoids having to invent
+a common scale for a keyword weight and a cosine similarity.
 
-The app can optionally show the retrieved source snippets after answering a question. It displays the top matching chunks used by the pipeline, although the current implementation does not preserve exact page or line references.
+### The bug this replaced
 
-That means the sources are useful for seeing the supporting text, but they are not yet a page-level citation system.
+An earlier version was keyword-first with a shortcut:
 
-## Limitations
-
-The current implementation intentionally stays small, and there are a few known boundaries:
-
-- retrieval uses keyword matching first and semantic search as a fallback
-- chunks are character-based rather than structure-aware
-- source snippets are not tied to exact PDF page or line numbers
-- one uploaded PDF is queried at a time
-- larger PDFs increase extraction, embedding, and indexing time
-- an OpenAI API key is required for answer generation
-
-These are also the natural next places to improve the system: structure-aware chunking, reranking, page-level provenance, and multi-document retrieval.
-
-## Architecture
-
-```text
-app.py
-  |
-  +--> loader.py        PDF → text
-  +--> chunker.py       text → overlapping chunks
-  +--> embedder.py      chunks → vectors
-  +--> vector_store.py  vectors → FAISS index
-  +--> retriever.py     query → relevant chunks
-  +--> llm.py           query + context → answer
+```python
+if any(word in chunk_lower for word in query.lower().split()):
+    keyword_hits.append(chunk)
+if len(keyword_hits) >= 3:
+    return keyword_hits[:k]
 ```
 
-The components are kept separate so that the retrieval and generation stages can be changed independently.
+`query.lower().split()` keeps stopwords, and almost every chunk of English prose
+contains "the". So `keyword_hits` filled from the start of the document, the
+`>= 3` condition passed on essentially every query, and the function returned
+**the first five chunks of the document regardless of the question**. The
+semantic branch below it was unreachable in practice: the FAISS index was built
+on every upload and never consulted.
 
-## Stack
+The same `split()` also left punctuation attached, so a query ending in
+"revenue?" would not match the word "revenue" in the text — the one term that
+mattered was the one that failed.
 
-Python · Streamlit · pdfplumber · Sentence Transformers · `all-MiniLM-L6-v2` · FAISS · OpenAI API
+The demo still produced plausible answers, because `gpt-4o-mini` is good at
+working with whatever context it is handed. That is exactly why it went
+unnoticed, and it is the argument for testing retrieval separately from
+generation: a bad retriever behind a good model looks fine until you check.
 
-## Run locally
+`tests/test_retriever.py` pins the fixed behaviour, including a case for each
+symptom above.
+
+## Citations
+
+Chunks carry the page they came from, passages reach the model labelled
+`[page 4]`, and the prompt requires page numbers in the answer. Without that, a
+grounded answer and a confident guess look identical.
+
+## Running it
 
 ```bash
-git clone https://github.com/vidit-16/doc-engine.git
-cd doc-engine
 pip install -r requirements.txt
-```
-
-Set your OpenAI API key:
-
-```bash
-setx OPENAI_API_KEY "your_api_key"
-```
-
-Then run:
-
-```bash
+export OPENAI_API_KEY=sk-...
 streamlit run app.py
 ```
 
-The app provides a PDF uploader, question input, generated answer, and optional retrieved source snippets.
+The model name can be overridden with `DOCENGINE_MODEL`.
 
-## Project structure
+## Tests
+
+```bash
+pip install -r requirements-test.txt
+pytest
+```
+
+59 tests, no API key and no network. The embedding model is replaced with a
+deterministic bag-of-words vectoriser and the OpenAI client with a stub, so the
+suite installs about 50MB rather than the roughly 2GB a torch stack needs, and
+runs in well under a second.
+
+That split is deliberate: `requirements.txt` is what the app needs,
+`requirements-test.txt` is what the tests need. If a test ever starts needing
+torch, that is a sign it has grown a dependency on something it should be
+stubbing.
+
+## Structure
 
 ```text
 .
-├── app.py
+├── app.py                 # Streamlit UI
 ├── src/
-│   ├── loader.py
-│   ├── chunker.py
-│   ├── embedder.py
-│   ├── vector_store.py
-│   ├── retriever.py
-│   └── llm.py
-└── requirements.txt
+│   ├── loader.py          # PDF → pages
+│   ├── chunker.py         # pages → page-tagged chunks
+│   ├── embedder.py        # chunks → normalised vectors (model loaded lazily)
+│   ├── vector_store.py    # FAISS inner-product index
+│   ├── retriever.py       # keyword + semantic, fused
+│   └── llm.py             # answer generation with page citations
+├── tests/
+└── .github/workflows/ci.yml
 ```
 
-## What I was interested in
+## Known limits
 
-The interesting part of this project is the boundary between retrieval and generation.
+- Chunking is character-based, so it can split mid-sentence. Sentence-aware
+  chunking would retrieve better and is the obvious next change.
+- Scanned PDFs with no text layer are rejected rather than OCR'd.
+- The index is rebuilt per upload and held in memory; there is no persistence
+  across sessions.
+- Retrieval quality is pinned by unit tests on a synthetic corpus, not measured
+  against a labelled question set. A small evaluation set would turn "the tests
+  pass" into a number.
 
-The retriever decides **what the model gets to see**.
+## License
 
-The LLM decides **how that evidence is turned into an answer**.
-
-Keeping those two jobs separate makes the system easier to inspect, and it gives a much clearer place to work when an answer is wrong: was the right passage never retrieved, or was the passage retrieved and then interpreted badly?
+MIT.
