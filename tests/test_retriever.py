@@ -166,3 +166,15 @@ def test_fusion_still_surfaces_a_chunk_only_one_strategy_found():
 
 def test_fusion_returns_at_most_k():
     assert len(fuse({i: i + 1 for i in range(10)}, {}, k=3)) == 3
+
+
+def test_the_default_depth_matches_what_was_measured(chunks, index):
+    """DEFAULT_K is a measured choice, not a taste; pin it so it isn't nudged.
+
+    Paraphrase recall runs 0.32, 0.36, 0.50, 0.55 at k = 3, 5, 8, 10 and then
+    plateaus. See evaluation/RESULTS.md.
+    """
+    from src.retriever import DEFAULT_K
+
+    assert DEFAULT_K == 8
+    assert len(search("revenue growth report headcount", chunks, index=index)) <= DEFAULT_K

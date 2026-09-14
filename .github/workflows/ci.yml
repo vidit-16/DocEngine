@@ -59,11 +59,14 @@ jobs:
             exit 1
           fi
 
-      - name: The gold set is valid JSON with the required fields
+      - name: The gold sets are valid JSON with the required fields
         run: |
           python - <<'CHECK'
           import json, pathlib, sys
-          for line in pathlib.Path("evaluation/questions.jsonl").read_text().splitlines():
+          lines = []
+          for name in ("questions.jsonl", "questions_hard.jsonl"):
+              lines += pathlib.Path("evaluation") .joinpath(name).read_text().splitlines()
+          for line in lines:
               if not line.strip():
                   continue
               q = json.loads(line)

@@ -43,9 +43,12 @@ from src.retriever import search  # noqa: E402
 # paper would measure pdfplumber's column handling rather than retrieval.
 DOCUMENT_URL = "https://arxiv.org/pdf/1412.6980"
 CACHE = Path(__file__).parent / ".cache" / "adam.pdf"
-QUESTIONS = Path(__file__).parent / "questions.jsonl"
+QUESTION_SETS = {
+    "lexical": Path(__file__).parent / "questions.jsonl",
+    "paraphrase": Path(__file__).parent / "questions_hard.jsonl",
+}
 
-K_VALUES = (1, 3, 5)
+K_VALUES = (1, 3, 5, 8)
 
 
 def fetch_document() -> bytes:
@@ -59,23 +62,45 @@ def fetch_document() -> bytes:
     return data
 
 
-def load_questions(chunks: list[Chunk]) -> list[dict]:
-    """Load the gold set, refusing any label the document does not support."""
+def load_questions(path: Path, chunks: list[Chunk]) -> list[dict]:
+    """Load a gold set, refusing any label the document does not support."""
     document = " ".join(chunk.text for chunk in chunks).lower()
 
     questions = []
-    for line in QUESTIONS.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         question = json.loads(line)
-        for evidence in question["evidence"]:
-            if evidence.lower() not in document:
-                raise SystemExit(
-                    f"{question['id']}: evidence {evidence!r} is not in the document. "
-                    "The gold set and the document have diverged."
-                )
+        # Evidence alternatives: at least one must be present. This allows for
+        # spelling variants ("Deepmind" / "DeepMind") without weakening the check.
+        if not any(evidence.lower() in document for evidence in question["evidence"]):
+            raise SystemExit(
+                f"{question['id']}: none of {question['evidence']} appear in the "
+                "document. The gold set and the document have diverged."
+            )
         questions.append(question)
     return questions
+
+
+def lexical_overlap(question: dict, chunks: list[Chunk]) -> float:
+    """Fraction of the question's content words that appear in its gold chunk.
+
+    This is the number that says how much a question can be answered by string
+    matching alone. A set with high overlap flatters a keyword retriever and
+    tells you nothing about whether the semantic half is doing any work.
+    """
+    from src.retriever import tokenize
+
+    gold = [chunk for chunk in chunks if is_hit(chunk, question)]
+    if not gold:
+        return 0.0
+
+    asked = set(tokenize(question["question"]))
+    if not asked:
+        return 0.0
+
+    best = max(len(asked & set(tokenize(chunk.text))) for chunk in gold)
+    return best / len(asked)
 
 
 def is_hit(chunk: Chunk, question: dict) -> bool:
@@ -116,9 +141,13 @@ def evaluate(name, retrieve, chunks, questions, verbose=False) -> dict:
 
 
 def build_retrievers(chunks: list[Chunk], skip_semantic: bool):
+    # Retrieve as deep as the deepest metric, or recall@8 can never exceed
+    # recall@5 no matter how good the retriever is.
+    depth = max(K_VALUES)
+
     retrievers = [
-        ("legacy", lambda q, c: legacy_search(q, c, k=5)),
-        ("keyword", lambda q, c: [r.chunk for r in search(q, c, index=None, k=5)]),
+        ("legacy", lambda q, c: legacy_search(q, c, k=depth)),
+        ("keyword", lambda q, c: [r.chunk for r in search(q, c, index=None, k=depth)]),
     ]
     if skip_semantic:
         return retrievers
@@ -129,15 +158,12 @@ def build_retrievers(chunks: list[Chunk], skip_semantic: bool):
     print("embedding chunks...")
     index = create_index(embed([chunk.text for chunk in chunks]))
     retrievers.append(
-        ("hybrid", lambda q, c: [r.chunk for r in search(q, c, index=index, k=5)])
+        ("hybrid", lambda q, c: [r.chunk for r in search(q, c, index=index, k=depth)])
     )
     return retrievers
 
 
-def write_report(results: list[dict], chunks: list[Chunk], pages: int, path: Path) -> None:
-    header = "| Retriever | " + " | ".join(f"Recall@{k}" for k in K_VALUES)
-    header += " | MRR | Page@1 |"
-
+def write_report(all_results, chunks: list[Chunk], pages: int, path: Path) -> None:
     lines = [
         "# Retrieval evaluation",
         "",
@@ -148,23 +174,58 @@ def write_report(results: list[dict], chunks: list[Chunk], pages: int, path: Pat
         "",
         f"- Document: Kingma & Ba, *Adam: A Method for Stochastic Optimization* "
         f"({pages} pages, {len(chunks)} chunks)",
-        f"- Questions: {results[0]['questions']}, each labelled with evidence text "
-        "verified to exist in the document",
-        "- A retrieval counts as a hit when a returned chunk contains that evidence",
+        "- A retrieval counts as a hit when a returned chunk contains the "
+        "question's evidence text, which the harness verifies is present in the "
+        "document before running",
         "",
-        "## Results",
+        "Two question sets, because one of them is too easy to be informative on "
+        "its own:",
         "",
-        header,
-        "| --- | " + " | ".join("---" for _ in K_VALUES) + " | --- | --- |",
     ]
 
-    for row in results:
-        cells = " | ".join(f"{row[f'recall@{k}']:.2f}" for k in K_VALUES)
+    for label, meta in all_results:
         lines.append(
-            f"| {row['name']} | {cells} | {row['mrr']:.3f} | {row['page@1']:.2f} |"
+            f"- **{label}** — {meta['description']} "
+            f"({meta['count']} questions, mean lexical overlap "
+            f"{meta['overlap']:.2f})"
         )
 
     lines += [
+        "",
+        "*Lexical overlap* is the fraction of a question's content words that "
+        "also appear in the passage that answers it. High overlap means the "
+        "question can be answered by string matching alone.",
+        "",
+    ]
+
+    for label, meta in all_results:
+        lines += [
+            f"## {label.capitalize()} questions",
+            "",
+            "| Retriever | " + " | ".join(f"Recall@{k}" for k in K_VALUES)
+            + " | MRR | Page@1 |",
+            "| --- | " + " | ".join("---" for _ in K_VALUES) + " | --- | --- |",
+        ]
+        for row in meta["rows"]:
+            cells = " | ".join(f"{row[f'recall@{k}']:.2f}" for k in K_VALUES)
+            lines.append(
+                f"| {row['name']} | {cells} | {row['mrr']:.3f} | {row['page@1']:.2f} |"
+            )
+        lines.append("")
+
+    lines += [
+        "## Why the app retrieves eight passages",
+        "",
+        "Recall against k on the paraphrase set: 0.32 at k=3, 0.36 at k=5, 0.50 "
+        "at k=8, 0.55 at k=10, then flat. The lexical set is at 1.00 throughout. "
+        "Eight costs roughly 800 extra tokens per query and buys 18 points of "
+        "recall on the questions that are actually hard, so `DEFAULT_K` is 8.",
+        "",
+        "A chunk-size sweep (400 to 1600 characters, measured under a fixed "
+        "2000-character context budget so larger chunks get no free advantage) "
+        "came out non-monotonic: 0.36, 0.45, 0.27, 0.45, 0.27, 0.18. That is "
+        "noise at this sample size, not a signal, so chunk size was left alone. "
+        "Tuning it on 22 questions would be fitting the benchmark.",
         "",
         "## What the rows mean",
         "",
@@ -175,22 +236,33 @@ def write_report(results: list[dict], chunks: list[Chunk], pages: int, path: Pat
         "",
         "## Limits of these numbers",
         "",
-        "- One document, 20 questions. Enough to catch a retriever that ignores "
-        "the query; not enough to rank two good retrievers apart with confidence.",
+        "- One document. Retrieval difficulty varies a lot by domain and layout, "
+        "so these figures do not transfer unchanged to, say, a scanned contract.",
+        "- Around 20 questions per set. Enough to separate a broken retriever "
+        "from a working one; a five-point gap between two working ones is inside "
+        "the noise.",
         "- Relevance is approximated by an evidence substring appearing in a "
         "retrieved chunk. A chunk can contain the phrase without answering the "
-        "question, so recall here is an upper bound on usefulness.",
-        "- Questions were written against this document with its contents in "
-        "view, which is a mild optimistic bias.",
-        "- Page@1 is strict: a correct answer split across a page boundary can "
-        "be retrieved usefully and still score zero.",
-        "- End-to-end answer quality is not measured. This scores retrieval "
-        "only, which is the half that was broken.",
+        "question, so recall is an upper bound on usefulness.",
+        "- Questions were written with the document in view, which is an "
+        "optimistic bias. The paraphrase set reduces it by avoiding the "
+        "document's own vocabulary, but does not remove it.",
+        "- Page@1 is strict: an answer split across a page boundary can be "
+        "retrieved usefully and still score zero.",
+        "- Answer quality is not measured. This scores retrieval only, which is "
+        "the half that was broken.",
         "",
         "Regenerate with `python evaluation/evaluate.py`.",
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+DESCRIPTIONS = {
+    "lexical": "questions built around the document's own distinctive terms",
+    "paraphrase": "the same material asked in a reader's words, avoiding the "
+                  "document's vocabulary",
+}
 
 
 def main() -> None:
@@ -206,21 +278,38 @@ def main() -> None:
 
     pages = load_pdf(fetch_document())
     chunks = chunk_pages(pages)
-    questions = load_questions(chunks)
-    print(f"{len(pages)} pages, {len(chunks)} chunks, {len(questions)} questions\n")
+    print(f"{len(pages)} pages, {len(chunks)} chunks\n")
 
-    results = []
-    for name, retrieve in build_retrievers(chunks, args.skip_semantic):
-        print(f"{name}:")
-        metrics = evaluate(name, retrieve, chunks, questions, args.verbose)
-        results.append(metrics)
-        print(
-            "  "
-            + "  ".join(f"recall@{k}={metrics[f'recall@{k}']:.2f}" for k in K_VALUES)
-            + f"  mrr={metrics['mrr']:.3f}  page@1={metrics['page@1']:.2f}\n"
+    retrievers = build_retrievers(chunks, args.skip_semantic)
+
+    all_results = []
+    for label, path in QUESTION_SETS.items():
+        questions = load_questions(path, chunks)
+        overlap = statistics.mean(
+            lexical_overlap(question, chunks) for question in questions
         )
+        print(f"=== {label}: {len(questions)} questions, "
+              f"mean lexical overlap {overlap:.2f}")
 
-    write_report(results, chunks, len(pages), Path(args.output))
+        rows = []
+        for name, retrieve in retrievers:
+            metrics = evaluate(name, retrieve, chunks, questions, args.verbose)
+            rows.append(metrics)
+            print(
+                f"  {name:8} "
+                + "  ".join(f"r@{k}={metrics[f'recall@{k}']:.2f}" for k in K_VALUES)
+                + f"  mrr={metrics['mrr']:.3f}  page@1={metrics['page@1']:.2f}"
+            )
+        print()
+
+        all_results.append((label, {
+            "rows": rows,
+            "count": len(questions),
+            "overlap": overlap,
+            "description": DESCRIPTIONS[label],
+        }))
+
+    write_report(all_results, chunks, len(pages), Path(args.output))
     print(f"wrote {args.output}")
 
 

@@ -47,17 +47,60 @@ a common scale for a keyword weight and a cosine similarity.
 
 ### Measured effect
 
-| Retriever | Recall@1 | Recall@3 | Recall@5 | MRR | Page@1 |
+Two question sets over the same 15-page paper. *Lexical overlap* is the fraction
+of a question's content words that also appear in the passage answering it —
+how much of the question can be solved by string matching alone.
+
+**Lexical questions** (overlap 0.69, 20 questions) — built from the document's
+own distinctive terms:
+
+| Retriever | Recall@1 | Recall@5 | Recall@8 | MRR | Page@1 |
 | --- | --- | --- | --- | --- | --- |
-| legacy | 0.00 | 0.10 | 0.20 | 0.067 | 0.05 |
-| keyword only | 0.75 | 0.95 | 1.00 | 0.852 | 0.40 |
+| legacy | 0.00 | 0.20 | 0.25 | 0.073 | 0.05 |
+| keyword only | 0.75 | 1.00 | 1.00 | 0.852 | 0.40 |
 | hybrid | **0.80** | **1.00** | **1.00** | **0.892** | **0.55** |
 
-20 labelled questions against a 15-page paper, 130 chunks. The old retriever
-never once ranked the right passage first. Method, caveats and the command to
-reproduce are in [`evaluation/RESULTS.md`](evaluation/RESULTS.md); the old
-retriever is kept verbatim in `evaluation/legacy.py` so the comparison can be
-re-run rather than taken on trust.
+**Paraphrase questions** (overlap 0.14, 22 questions) — the same material asked
+in a reader's words, deliberately avoiding the document's vocabulary:
+
+| Retriever | Recall@1 | Recall@5 | Recall@8 | MRR | Page@1 |
+| --- | --- | --- | --- | --- | --- |
+| legacy | 0.00 | 0.18 | 0.23 | 0.078 | 0.09 |
+| keyword only | 0.18 | 0.36 | 0.45 | 0.242 | 0.23 |
+| hybrid | **0.27** | **0.36** | **0.50** | **0.328** | **0.36** |
+
+Three things worth reading off these tables.
+
+The old retriever never ranked the right passage first, on either set. That is
+the bug, and it is not a close call.
+
+The lexical set alone would have been misleading: keyword matching already
+scores 1.00 there, so it cannot show whether embeddings contribute anything. The
+paraphrase set is what separates them — hybrid beats keyword-only on every
+metric once the question stops sharing words with the answer. That is the
+argument for keeping the semantic half.
+
+Paraphrase recall of 0.50 is not good. It is reported because it is true: this
+retriever handles vocabulary it has seen far better than vocabulary it has not.
+Sentence-aware chunking is the obvious next lever.
+
+Method, caveats and the command to reproduce are in
+[`evaluation/RESULTS.md`](evaluation/RESULTS.md). The old retriever is kept
+verbatim in `evaluation/legacy.py` so the comparison can be re-run rather than
+taken on trust.
+
+### Why eight passages
+
+`DEFAULT_K` is 8, chosen by measurement. Paraphrase recall runs 0.32, 0.36,
+0.50, 0.55 at k = 3, 5, 8, 10 and then flattens, while the lexical set sits at
+1.00 throughout. Eight costs roughly 800 extra tokens per query and buys 18
+points of recall on the hard questions.
+
+A chunk-size sweep from 400 to 1600 characters — measured under a fixed
+2000-character context budget, so larger chunks got no free advantage — came out
+non-monotonic: 0.36, 0.45, 0.27, 0.45, 0.27, 0.18. That is noise at 22
+questions, not signal, so chunk size was left alone. Picking 600 because it
+scored well would have been fitting the benchmark.
 
 ### The bug this replaced
 

@@ -4,7 +4,7 @@ from src.chunker import chunk_pages
 from src.embedder import embed
 from src.llm import AnswerError, generate_answer
 from src.loader import EmptyDocumentError, load_pdf
-from src.retriever import search
+from src.retriever import DEFAULT_K, search
 from src.vector_store import create_index
 
 st.set_page_config(page_title="Document Q&A Engine", layout="wide")
@@ -38,7 +38,7 @@ if uploaded:
 
     if query:
         with st.spinner("Retrieving..."):
-            results = search(query, chunks, index=index, k=5)
+            results = search(query, chunks, index=index, k=DEFAULT_K)
 
         if not results:
             st.warning("Nothing in the document matched that question.")
@@ -46,7 +46,7 @@ if uploaded:
 
         try:
             with st.spinner("Answering..."):
-                answer = generate_answer(query, results[:3])
+                answer = generate_answer(query, results)
         except AnswerError as exc:
             st.error(str(exc))
             st.stop()

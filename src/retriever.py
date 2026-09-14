@@ -53,6 +53,15 @@ where why how me my we our you your he him his she her they them their i
 
 RRF_K = 60  # standard damping constant; larger flattens the rank weighting
 
+# How many passages to retrieve and hand to the model by default.
+#
+# Chosen by measurement, not taste. On the paraphrase question set, recall rises
+# 0.32 -> 0.36 -> 0.50 -> 0.55 at k = 3, 5, 8, 10 and then plateaus, while the
+# lexical set sits at 1.00 throughout. Eight costs roughly 800 extra tokens per
+# query against gpt-4o-mini and buys 18 points of recall on the questions that
+# are actually hard. See evaluation/RESULTS.md.
+DEFAULT_K = 8
+
 
 @dataclass(frozen=True)
 class Retrieved:
@@ -137,8 +146,8 @@ def search(
     query: str,
     chunks: list[Chunk],
     index=None,
-    k: int = 5,
-    pool: int = 20,
+    k: int = DEFAULT_K,
+    pool: int = 30,
 ) -> list[Retrieved]:
     """Retrieve the k chunks most likely to answer the query.
 

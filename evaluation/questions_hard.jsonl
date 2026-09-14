@@ -1,0 +1,22 @@
+{"id": "h01", "question": "Who came up with what to call this optimizer?", "evidence": ["coining the name"], "pages": [10]}
+{"id": "h02", "question": "What does the ratio between the two running estimates tell you about how certain a direction is?", "evidence": ["signal-to-noise"], "pages": [3]}
+{"id": "h03", "question": "Is there a limit on how far one update can move the weights?", "evidence": ["trust region"], "pages": [3]}
+{"id": "h04", "question": "Why is that other approach impractical on hardware with limited memory?", "evidence": ["Sum-of-Functions Optimizer"], "pages": [5]}
+{"id": "h05", "question": "Which earlier technique omits the correction and becomes unstable when the decay is near one?", "evidence": ["RMSProp also lacks"], "pages": [5]}
+{"id": "h06", "question": "What generative model did they train to study the effect of the correction terms?", "evidence": ["VAE"], "pages": [8]}
+{"id": "h07", "question": "How wide was the hidden layer in that generative experiment?", "evidence": ["500 hidden units"], "pages": [8]}
+{"id": "h08", "question": "What replaces the squared-gradient accumulator in the alternative version?", "evidence": ["infinity norm"], "pages": [9]}
+{"id": "h09", "question": "What starting values do the authors suggest for the tuning knobs?", "evidence": ["Good default settings"], "pages": [2]}
+{"id": "h10", "question": "What is guaranteed about accumulated loss across all rounds?", "evidence": ["regret"], "pages": [4]}
+{"id": "h11", "question": "Whose theoretical setting is the proof built on?", "evidence": ["Zinkevich"], "pages": [4]}
+{"id": "h12", "question": "Which statistical quantity does the second accumulator approximate?", "evidence": ["Fisher information"], "pages": [5]}
+{"id": "h13", "question": "Which handwritten digit dataset shows up in the experiments?", "evidence": ["MNIST"], "pages": [6, 7]}
+{"id": "h14", "question": "Was any film review corpus used for testing?", "evidence": ["IMDB"], "pages": [6]}
+{"id": "h15", "question": "What technique did they use to stop the models memorising the training data?", "evidence": ["dropout"], "pages": [6, 7]}
+{"id": "h16", "question": "Which ten-class image benchmark did they run the convolutional experiment on?", "evidence": ["CIFAR"], "pages": [7]}
+{"id": "h17", "question": "Which organisation supported this work?", "evidence": ["Deepmind", "DeepMind"], "pages": [10]}
+{"id": "h18", "question": "Does the alternative version recommend a different step size?", "evidence": ["0.002"], "pages": [9]}
+{"id": "h19", "question": "Which two existing approaches does it claim to bring together?", "evidence": ["combines the advantages"], "pages": [10]}
+{"id": "h20", "question": "How does it cope when the thing being optimised keeps changing?", "evidence": ["non-stationary"], "pages": [1, 10]}
+{"id": "h21", "question": "Is it affected if each coordinate is scaled differently?", "evidence": ["diagonal rescaling"], "pages": [1]}
+{"id": "h22", "question": "Who found the mistake in the original derivation?", "evidence": ["Kai Fan"], "pages": [10]}
