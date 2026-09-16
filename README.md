@@ -11,22 +11,46 @@ Live demo: https://doc--engine.streamlit.app/
 <p align="center">
   <img src="docs/screenshots/docengine.png" alt="Answer with page citations and the retrieved passages" width="85%">
 </p>
-<p align="center"><em>The Adam paper, 130 passages indexed. The answer cites its pages, and each source passage shows its page and whether it matched by keyword, by meaning, or both.</em></p>
+<p align="center"><em>The Adam paper indexed. The answer cites its pages, and each source passage shows its page and how it was matched.</em></p>
+
+## Accuracy
+
+Measured on a held-out test split of 70 questions over four documents (two
+technical papers, the NIST AI Risk Management Framework, and the IPCC AR6
+summary), none of which were used while tuning:
+
+| | Previous version | Current | Change |
+| --- | --- | --- | --- |
+| **Correct answers** | 75.0% | **86.8%** | +11.8 pts |
+| Correct, questions reworded away from the document's wording | 69.7% | 84.8% | +15.1 |
+| Right passage among those retrieved | 76.5% | 89.7% | +13.2 |
+| Answer cites a page the evidence is on | 80.9% | 86.8% | +5.9 |
+| Citation precision | 79.0% | 83.6% | +4.6 |
+| Declined questions the document cannot answer | 2 of 2 | 2 of 2 | |
+
+Correctness is judged by `gpt-4.1-mini` against reference answers; the judge
+agrees with hand labels on 93.5% of answers and, where it disagrees, is stricter
+than a person. How the set was built, every configuration that was tried
+(including the ones that did not help), and the remaining errors are in
+**[evaluation/ACCURACY.md](evaluation/ACCURACY.md)**.
 
 ## The pipeline
 
 ```text
 PDF
- ↓  pdfplumber, page by page
+ ↓  pdfplumber, page by page; rotated text rebuilt, line-break hyphenation repaired
 pages
- ↓  400-char chunks, 50-char overlap, never crossing a page boundary
+ ↓  whole-sentence chunks up to 600 characters, never crossing a page boundary
 chunks (each tagged with its page)
- ↓  MiniLM embeddings, L2-normalised
+ ↓  bge-small-en-v1.5 embeddings, L2-normalised
 FAISS inner-product index
- ↓
-hybrid retrieval: keyword ranking + semantic ranking, fused
- ↓
-top passages → gpt-4o-mini, answering only from them, citing pages
+
+question
+ ↓  gpt-4o-mini rewrites it as a standalone query and drafts a hypothetical answer
+three phrasings
+ ↓  each: keyword ranking + semantic ranking, fused, then reranked by a cross-encoder
+ ↓  the three rankings fused
+top 8 passages → gpt-4o-mini, answering only from them, citing pages
 ```
 
 ## Retrieval
@@ -34,78 +58,38 @@ top passages → gpt-4o-mini, answering only from them, citing pages
 This is the part of the system that decides what the model is allowed to see, so
 it is the part worth explaining.
 
-Two strategies run on every query.
-
 **Keyword.** The query is tokenised: lowercased, punctuation stripped, stopwords
 removed, numbers kept. Chunks are scored by how much of the query's content
 vocabulary they contain, weighted so that a rare term counts for more than a
 common one, and scaled by what fraction of the query the chunk covers.
 
-**Semantic.** The query is embedded and matched against the FAISS index by
-cosine similarity.
+**Semantic.** The query is embedded with the instruction prefix bge models are
+trained with and matched against the FAISS index by cosine similarity.
 
-The two rankings are then combined with Reciprocal Rank Fusion: each strategy
-contributes `1 / (60 + rank)` to the chunks it ranks highly. A chunk both agree
-on rises to the top, while a chunk only one of them is confident about can still
-surface. RRF fuses *rankings* rather than scores, which avoids having to invent
-a common scale for a keyword weight and a cosine similarity.
+The two rankings are combined with Reciprocal Rank Fusion: each contributes
+`1 / (60 + rank)` to the chunks it ranks highly. RRF fuses *rankings* rather than
+scores, which avoids inventing a common scale for a keyword weight and a cosine
+similarity. Removing the keyword half cost 8 points of recall.
 
-### Measured effect
+**Reranking.** The top 30 fused candidates are rescored by a cross-encoder
+(`ms-marco-MiniLM-L-6-v2`), which reads the question and passage together. This
+was the largest single gain in ranking the right passage first (44% to 58%).
 
-Two question sets over the same 15-page paper. *Lexical overlap* is the fraction
-of a question's content words that also appear in the passage answering it —
-how much of the question can be solved by string matching alone.
+**Query expansion.** Readers ask about "it" and use their own words; documents
+use their own terms. Before searching, the model is shown the document's opening
+and asked for a standalone rewrite and a one-sentence hypothetical answer. Each
+phrasing is searched and reranked separately, and the three rankings are fused.
+This took recall from 84% to 92% on the development split. If the call fails,
+search proceeds with the original question.
 
-**Lexical questions** (overlap 0.69, 20 questions) — built from the document's
-own distinctive terms:
+**Sentence chunks.** Chunks end on sentence boundaries (with common abbreviations
+protected) instead of cutting sentences in half, and each chunk repeats the last
+sentence of the previous one.
 
-| Retriever | Recall@1 | Recall@5 | Recall@8 | MRR | Page@1 |
-| --- | --- | --- | --- | --- | --- |
-| legacy | 0.00 | 0.20 | 0.25 | 0.073 | 0.05 |
-| keyword only | 0.75 | 1.00 | 1.00 | 0.852 | 0.40 |
-| hybrid | **0.80** | **1.00** | **1.00** | **0.892** | **0.55** |
-
-**Paraphrase questions** (overlap 0.14, 22 questions) — the same material asked
-in a reader's words, deliberately avoiding the document's vocabulary:
-
-| Retriever | Recall@1 | Recall@5 | Recall@8 | MRR | Page@1 |
-| --- | --- | --- | --- | --- | --- |
-| legacy | 0.00 | 0.18 | 0.23 | 0.078 | 0.09 |
-| keyword only | 0.18 | 0.36 | 0.45 | 0.242 | 0.23 |
-| hybrid | **0.27** | **0.36** | **0.50** | **0.328** | **0.36** |
-
-Three things worth reading off these tables.
-
-The old retriever never ranked the right passage first, on either set. That is
-the bug, and it is not a close call.
-
-The lexical set alone would have been misleading: keyword matching already
-scores 1.00 there, so it cannot show whether embeddings contribute anything. The
-paraphrase set is what separates them — hybrid beats keyword-only on every
-metric once the question stops sharing words with the answer. That is the
-argument for keeping the semantic half.
-
-Paraphrase recall of 0.50 is not good. It is reported because it is true: this
-retriever handles vocabulary it has seen far better than vocabulary it has not.
-Sentence-aware chunking is the obvious next lever.
-
-Method, caveats and the command to reproduce are in
-[`evaluation/RESULTS.md`](evaluation/RESULTS.md). The old retriever is kept
-verbatim in `evaluation/legacy.py` so the comparison can be re-run rather than
-taken on trust.
-
-### Why eight passages
-
-`DEFAULT_K` is 8, chosen by measurement. Paraphrase recall runs 0.32, 0.36,
-0.50, 0.55 at k = 3, 5, 8, 10 and then flattens, while the lexical set sits at
-1.00 throughout. Eight costs roughly 800 extra tokens per query and buys 18
-points of recall on the hard questions.
-
-A chunk-size sweep from 400 to 1600 characters — measured under a fixed
-2000-character context budget, so larger chunks got no free advantage — came out
-non-monotonic: 0.36, 0.45, 0.27, 0.45, 0.27, 0.18. That is noise at 22
-questions, not signal, so chunk size was left alone. Picking 600 because it
-scored well would have been fitting the benchmark.
+An earlier chunk-size sweep over one document and 22 questions was noise, and
+chunk size was deliberately left alone then. With 138 questions over four
+documents, 600 characters was chosen on the development split and confirmed on
+the untouched test split.
 
 ### The bug this replaced
 
@@ -142,12 +126,19 @@ symptom above.
 pdfplumber inserts a space when the gap between two characters exceeds
 `x_tolerance`, which defaults to 3 points. That is too wide for the Type 1 fonts
 most academic PDFs use: narrow spaces fall below the threshold and words arrive
-glued together, as `theencoderiscomposedof`.
+glued together, as `theencoderiscomposedof`. Measured across five arXiv papers,
+dropping to 1.5 recovers **30% to 182% more word tokens**. Override with
+`DOCENGINE_X_TOLERANCE`.
 
-Measured across five arXiv papers, dropping to 1.5 recovers **30% to 182% more
-word tokens** and removes glued tokens entirely. On the Transformer paper the
-old setting was surfacing about a third of the document's words, which a keyword
-retriever cannot recover from. Override with `DOCENGINE_X_TOLERANCE`.
+Three more artefacts are repaired, each found while building the evaluation set:
+
+- **Rotated text.** Landscape figure pages come out reversed and without spaces
+  ("gnitsettuoba" for "about testing"). Rotated characters are regrouped into
+  lines by position and read in the right direction.
+- **Hyphenation across line breaks.** The NIST framework alone has 233 words
+  like "man- agement", which neither retriever can match. Each is joined or kept
+  based on the document's own vocabulary, so "third-party" keeps its hyphen.
+- **Unmapped glyphs.** pdfplumber's `(cid:NN)` placeholders are removed.
 
 ## Citations
 
@@ -166,7 +157,7 @@ streamlit run app.py
 The key can also come from an ordinary environment variable. The model name can be
 overridden with `DOCENGINE_MODEL`.
 
-With Docker (the embedding model is baked into the image):
+With Docker (the embedding and reranking models are baked into the image):
 
 ```bash
 docker build -t docengine .
@@ -179,38 +170,23 @@ layer) are reported in the UI rather than raised as a traceback.
 ## Evaluation
 
 ```bash
-python evaluation/evaluate.py
+python evaluation/build_gold.py                       # validate the gold set against the PDFs
+python evaluation/benchmark.py retrieval --split dev  # free
+python evaluation/benchmark.py answers --split dev    # API calls, with a spending cap
 ```
 
-Downloads the reference paper, runs all three retrievers over the labelled
-question set, and rewrites `evaluation/RESULTS.md`. Labels are self-checking:
-the harness verifies every evidence string is present in the extracted text and
-refuses to run if the gold set and the document have drifted apart.
+`evaluation/gold/` holds 138 questions over four documents, each with exact
+evidence strings, gold pages and a reference answer, split into dev and test by a
+hash of the id. `build_gold.py` refuses to write the set if any evidence string is
+missing from the extracted text. `benchmark.py` scores retrieval recall and, for
+answers, correctness, citation accuracy and abstention, logging spend against a
+cap. See [evaluation/ACCURACY.md](evaluation/ACCURACY.md) for the method and
+results.
 
-`--skip-semantic` measures legacy and keyword only, without loading a model.
-
-### Answer models
-
-```bash
-python evaluation/answer_ab.py
-```
-
-Holds retrieval fixed and compares answer models (`gpt-4o-mini`, `gpt-4.1-mini`,
-`gpt-4.1-nano` by default) on the same passages. Each answer is scored on whether it
-cites a page the evidence is actually on, and on whether it abstains for three
-off-document control questions, where any other reply is an answer from outside
-knowledge. Writes `evaluation/ANSWER_AB.md`. This one makes real API calls, a few
-cents with the default models.
-
-| Model | Cites a gold page (42 questions) | Abstained | Off-document abstained | Median latency |
-| --- | --- | --- | --- | --- |
-| gpt-4o-mini (default) | 62% | 7% | 100% | 1.15s |
-| gpt-4.1-mini | 64% | 0% | 100% | 1.18s |
-| gpt-4.1-nano | 57% | 7% | 100% | 0.92s |
-
-The spread is three questions out of 42, which is inside the noise for a set this
-size, so the default stays `gpt-4o-mini`. All three refused every off-document
-question rather than answering from outside knowledge.
+`evaluation/evaluate.py` and `evaluation/answer_ab.py` are the earlier
+single-document studies (the retrieval bug fix and the first answer-model
+comparison); their reports, `RESULTS.md` and `ANSWER_AB.md`, describe the
+pipeline as it was then.
 
 ## Tests
 
@@ -219,19 +195,21 @@ pip install -r requirements-test.txt
 pytest
 ```
 
-89 tests, no API key and no network. The embedding model is replaced with a
-deterministic bag-of-words vectoriser and the OpenAI client with a stub, so the
-suite installs about 50MB rather than the roughly 2GB a torch stack needs, and
-runs in well under a second.
+126 tests, no API key and no network. The embedding model is replaced with a
+deterministic bag-of-words vectoriser, the cross-encoder with a word-overlap
+stub and the OpenAI client with a stub, so the suite installs about 50MB rather
+than the roughly 2GB a torch stack needs, and runs in about a second.
 
-**Mutation testing.** `python scripts/mutation_test.py` changes the chunker, retriever,
-loader and answer module one operator or constant at a time and re-runs the suite
-for each change. **55 of 56 mutants are killed (98.2%)**, and CI runs it on every push.
-The first run killed 50%: the overlap test used a repeating string, so it passed
-with overlap switched off, and nothing pinned the fusion formula, the keyword score
-or the short-tail threshold. `tests/test_boundaries.py` closes those. The one
-survivor is equivalent: removing a `not` in an early return for "no matches" leaves
-fusion to return the same empty list.
+**Mutation testing.** `python scripts/mutation_test.py` changes the chunker,
+retriever, loader and answer module one operator or constant at a time and
+re-runs the suite for each change. **110 of 118 mutants are killed (93.2%)**, and
+CI runs it on every push. After the accuracy work added sentence chunking,
+rotated-text handling and multi-query search, the first run killed 79%; exact
+tests for packing boundaries, reading direction, the word-gap threshold,
+hyphenation rules and fusion tie-breaks closed the real gaps. The 8 survivors
+are equivalent: shifting or scaling every fused score alike, a loop bound the
+break above already guards, and the default direction for rotated characters,
+which always carry a text matrix.
 
 That split is deliberate: `requirements.txt` is what the app needs,
 `requirements-test.txt` is what the tests need. If a test ever starts needing
@@ -244,13 +222,19 @@ stubbing.
 .
 ├── app.py                 # Streamlit UI
 ├── src/
-│   ├── loader.py          # PDF → pages
-│   ├── chunker.py         # pages → page-tagged chunks
+│   ├── loader.py          # PDF → pages, with extraction artefacts repaired
+│   ├── chunker.py         # pages → page-tagged sentence chunks
 │   ├── embedder.py        # chunks → normalised vectors (model loaded lazily)
 │   ├── vector_store.py    # FAISS inner-product index
-│   ├── retriever.py       # keyword + semantic, fused
-│   └── llm.py             # answer generation with page citations
-├── evaluation/            # retrieval eval, answer-model A/B, gold question sets
+│   ├── retriever.py       # keyword + semantic, fused, reranked, multi-query
+│   ├── reranker.py        # cross-encoder reranking (model loaded lazily)
+│   └── llm.py             # query expansion and answers with page citations
+├── evaluation/
+│   ├── gold/              # 138 labelled questions over four documents
+│   ├── build_gold.py      # validates the gold set against the PDFs
+│   ├── benchmark.py       # retrieval and answer accuracy, with a spending cap
+│   ├── ACCURACY.md        # method, every configuration tried, results
+│   └── ...                # earlier single-document studies
 ├── scripts/mutation_test.py
 ├── tests/
 ├── Dockerfile
@@ -260,17 +244,17 @@ stubbing.
 
 ## Known limits
 
-- Chunking is character-based, so it can split mid-sentence. Sentence-aware
-  chunking would retrieve better and is the obvious next change.
 - Scanned PDFs with no text layer are rejected rather than OCR'd.
+- A sentence that runs across a page break is split into two chunks, because a
+  chunk spanning pages could not be cited honestly. This causes some misses.
+- Tables are extracted row by row with their columns interleaved, which makes
+  table cells harder to retrieve and to read.
+- Chemical and mathematical subscripts are lost in extraction ("GtCO" for GtCO2).
+- Query expansion adds one small model call per question.
 - The index is rebuilt per upload and held in memory; there is no persistence
   across sessions.
-- The evaluation is one document and 20 questions. Enough to catch a retriever
-  that ignores the query, not enough to separate two good ones with confidence.
-- Relevance is approximated by an evidence substring appearing in a retrieved
-  chunk, so recall is an upper bound on usefulness.
-- Answer quality is measured only by citation grounding and abstention
-  (`evaluation/answer_ab.py`), not by judging whether the answer is correct.
+- The evaluation covers four English documents. It separates the previous and
+  current pipelines clearly, but not configurations a few points apart.
 
 ## License
 

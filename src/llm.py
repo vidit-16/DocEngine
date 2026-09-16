@@ -11,20 +11,31 @@ indistinguishable from a confident guess.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 
 from src.retriever import Retrieved
+
+logger = logging.getLogger(__name__)
 
 MODEL = os.getenv("DOCENGINE_MODEL", "gpt-4o-mini")
 
 # The fixed reply the prompt asks for when the passages do not answer the question.
 ABSTAIN = "Not clearly found in document"
 
-SYSTEM_PROMPT = """You answer questions about a single document.
+SYSTEM_PROMPT = """You answer questions about a single document, using only the supplied passages.
 
 Rules:
-- Use only the supplied passages. Do not use outside knowledge.
-- Cite the page number for each claim, like (p. 4).
+- Begin with a direct answer to exactly what was asked, in one or two sentences.
+  Then add only the detail needed to support it.
+- Use only the passages. Do not use outside knowledge.
+- Cite the page for each claim, like (p. 4). Cite only pages whose passages
+  support that claim.
+- Keep numbers, units and names exactly as the passages state them.
+- Passages often describe several similar things, such as a method and its
+  variant, or different scenarios. Check that every value you give belongs to
+  the thing the question asks about, and never mix them.
 - If the passages do not contain the answer, say exactly:
   Not clearly found in document
 - Do not reproduce long verbatim runs from the passages; summarise instead.
@@ -93,3 +104,49 @@ def generate_answer(query: str, results: list[Retrieved], model: str | None = No
         raise AnswerError(f"The answer could not be generated ({model}): {exc}") from exc
 
     return (response.choices[0].message.content or "").strip()
+
+
+EXPAND_PROMPT = """You help search a document. Here is how the document begins:
+
+{opening}
+
+A reader asked: {question}
+
+1. Rewrite the question as a standalone search query that names what "it", "this"
+   or "they" refer to and uses the document's own terminology.
+2. Write one sentence that could plausibly appear in the document and answer it.
+   It does not need to be correct; it is only used to find similar passages.
+
+Reply with JSON only: {{"query": "...", "passage": "..."}}"""
+
+
+def expand_query(question: str, opening: str, model: str | None = None) -> list[str]:
+    """Alternative phrasings of a question for retrieval: a rewrite and a hypothetical passage.
+
+    Readers ask about "it" and use their own words; documents use their own
+    terms. The opening of the document gives the model enough context to name
+    the subject and borrow the document's vocabulary. On the gold set this
+    raised recall@8 from 84% to 92% (see evaluation/ACCURACY.md).
+
+    Retrieval must not depend on this call: any failure returns no expansions
+    and the search proceeds with the original question alone.
+    """
+    if not question.strip():
+        return []
+    try:
+        response = get_client().chat.completions.create(
+            model=model or MODEL,
+            messages=[{
+                "role": "user",
+                "content": EXPAND_PROMPT.format(opening=opening[:1200], question=question),
+            }],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+    except Exception as exc:  # noqa: BLE001 - expansion is an optimisation, never a failure
+        logger.warning("query expansion skipped: %s", exc)
+        return []
+    return [
+        str(data[key]).strip() for key in ("query", "passage") if str(data.get(key, "")).strip()
+    ]

@@ -103,7 +103,7 @@ def test_the_system_prompt_constrains_the_model_to_the_passages(client):
     system = fake.calls[0]["messages"][0]["content"]
     assert "only the supplied passages" in system
     assert "Not clearly found in document" in system
-    assert "page number" in system
+    assert "Cite the page for each claim" in system
 
 
 def test_temperature_is_low_for_an_extraction_task(client):
@@ -127,7 +127,7 @@ def test_a_missing_api_key_is_reported_clearly(monkeypatch):
     """The key used to be read at import, so a missing one failed far from here."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     llm._client = None
-    with pytest.raises(AnswerError, match="OPENAI_API_KEY"):
+    with pytest.raises(AnswerError, match="not configured: OPENAI_API_KEY is not set"):
         generate_answer("q", make_results(("text", 1)))
 
 

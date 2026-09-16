@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import numpy as np
 
-MODEL_NAME = "all-MiniLM-L6-v2"
+# bge-small-en-v1.5 is trained with an instruction prefix on queries (not on
+# passages). On the four-document gold set it matched MiniLM on recall@8 and
+# ranked the right passage first more often (see evaluation/ACCURACY.md).
+MODEL_NAME = "BAAI/bge-small-en-v1.5"
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 _model = None
 
@@ -30,8 +34,10 @@ def set_model(model) -> None:
     _model = model
 
 
-def embed(texts: list[str]) -> np.ndarray:
+def embed(texts: list[str], query: bool = False) -> np.ndarray:
     """Embed texts as L2-normalised float32 vectors.
+
+    Pass ``query=True`` for search queries, which the model expects prefixed.
 
     Normalising here means an inner-product index computes cosine similarity,
     which is what MiniLM is trained for. The previous setup used raw vectors
@@ -40,6 +46,8 @@ def embed(texts: list[str]) -> np.ndarray:
     if not texts:
         return np.zeros((0, 384), dtype="float32")
 
+    if query:
+        texts = [QUERY_PREFIX + text for text in texts]
     vectors = np.asarray(get_model().encode(texts), dtype="float32")
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
