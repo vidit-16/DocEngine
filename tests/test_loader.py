@@ -62,7 +62,7 @@ def test_empty_upload_is_rejected():
 
 
 def test_non_pdf_bytes_are_reported_not_raised_raw():
-    with pytest.raises(DocumentError, match="Could not read"):
+    with pytest.raises(DocumentError, match="could not be read"):
         load_pdf(b"this is a text file, not a PDF")
 
 

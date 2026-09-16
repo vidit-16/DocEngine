@@ -17,6 +17,9 @@ from src.retriever import Retrieved
 
 MODEL = os.getenv("DOCENGINE_MODEL", "gpt-4o-mini")
 
+# The fixed reply the prompt asks for when the passages do not answer the question.
+ABSTAIN = "Not clearly found in document"
+
 SYSTEM_PROMPT = """You answer questions about a single document.
 
 Rules:
@@ -42,7 +45,7 @@ def get_client():
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise AnswerError(
-                "OPENAI_API_KEY is not set. Add it to your environment or .env file."
+                "The answering service is not configured: OPENAI_API_KEY is not set."
             )
         from openai import OpenAI
 
@@ -66,7 +69,7 @@ def build_context(results: list[Retrieved]) -> str:
 def generate_answer(query: str, results: list[Retrieved], model: str | None = None) -> str:
     """Answer a question from retrieved passages."""
     if not results:
-        return "Not clearly found in document"
+        return ABSTAIN
 
     user_prompt = (
         f"Passages:\n\n{build_context(results)}\n\n"
@@ -87,6 +90,6 @@ def generate_answer(query: str, results: list[Retrieved], model: str | None = No
     except AnswerError:
         raise
     except Exception as exc:
-        raise AnswerError(f"Model request failed ({model}): {exc}") from exc
+        raise AnswerError(f"The answer could not be generated ({model}): {exc}") from exc
 
     return (response.choices[0].message.content or "").strip()
