@@ -197,6 +197,16 @@ off-document control questions, where any other reply is an answer from outside
 knowledge. Writes `evaluation/ANSWER_AB.md`. This one makes real API calls, a few
 cents with the default models.
 
+| Model | Cites a gold page (42 questions) | Abstained | Off-document abstained | Median latency |
+| --- | --- | --- | --- | --- |
+| gpt-4o-mini (default) | 62% | 7% | 100% | 1.15s |
+| gpt-4.1-mini | 64% | 0% | 100% | 1.18s |
+| gpt-4.1-nano | 57% | 7% | 100% | 0.92s |
+
+The spread is three questions out of 42, which is inside the noise for a set this
+size, so the default stays `gpt-4o-mini`. All three refused every off-document
+question rather than answering from outside knowledge.
+
 ## Tests
 
 ```bash
