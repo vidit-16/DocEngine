@@ -7,9 +7,9 @@ except ImportError:  # optional: plain environment variables work without it
 else:
     load_dotenv()
 
-from src.chunker import chunk_pages
+from src.chunker import SENTENCE_CHUNK_SIZE, chunk_sentences
 from src.embedder import embed
-from src.llm import ABSTAIN, AnswerError, generate_answer
+from src.llm import ABSTAIN, AnswerError, expand_query, generate_answer
 from src.loader import DocumentError, load_pdf
 from src.retriever import DEFAULT_K, search
 from src.vector_store import create_index
@@ -28,7 +28,7 @@ st.caption(
 def build_pipeline(file_bytes: bytes):
     """Parse, chunk and index a PDF. Cached so re-asking does not re-embed."""
     pages = load_pdf(file_bytes)
-    chunks = chunk_pages(pages)
+    chunks = chunk_sentences(pages, chunk_size=SENTENCE_CHUNK_SIZE)
     index = create_index(embed([chunk.text for chunk in chunks]))
     return pages, chunks, index
 
@@ -51,7 +51,11 @@ if uploaded:
 
     if query:
         with st.spinner("Searching the document"):
-            results = search(query, chunks, index=index, k=DEFAULT_K)
+            opening = " ".join(page.text for page in pages[:2])
+            rewrites = expand_query(query, opening)
+            results = search(
+                query, chunks, index=index, k=DEFAULT_K, rerank=True, extra_queries=rewrites
+            )
 
         if not results:
             st.warning("No passages in the document match this question. Try different wording.")
@@ -82,5 +86,9 @@ if uploaded:
                     matched_by.append(f"meaning match (rank {item.semantic_rank})")
 
                 st.markdown(f"**{position}. Page {item.chunk.page}**")
-                st.caption(" and ".join(matched_by))
+                st.caption(
+                    " and ".join(matched_by)
+                    if matched_by
+                    else "found through a rephrased version of the question"
+                )
                 st.text(item.chunk.text[:400] + ("..." if len(item.chunk.text) > 400 else ""))

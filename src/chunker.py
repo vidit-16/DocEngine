@@ -15,6 +15,11 @@ from src.loader import Page
 DEFAULT_CHUNK_SIZE = 400
 DEFAULT_OVERLAP = 50
 
+# Size used by the app. Whole-sentence chunks of up to 600 characters gave the
+# best answer accuracy on the gold set (evaluation/ACCURACY.md); a 400 limit
+# lowered retrieval recall.
+SENTENCE_CHUNK_SIZE = 600
+
 # Below this, a fragment carries no usable meaning and only adds retrieval
 # noise. It is dropped unless it is the only thing on its page.
 MIN_CHUNK_CHARS = 40
@@ -118,7 +123,9 @@ def chunk_sentences(
         start = 0
         while start < len(sentences):
             end, length = start, 0
-            while end < len(sentences) and (end == start or length + len(sentences[end]) <= chunk_size):
+            while end < len(sentences) and (
+                end == start or length + len(sentences[end]) <= chunk_size
+            ):
                 length += len(sentences[end]) + 1
                 end += 1
             chunks.append(

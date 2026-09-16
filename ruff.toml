@@ -4,3 +4,7 @@ target-version = "py310"
 
 [lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[lint.per-file-ignores]
+# Question data: wrapping long question and answer strings would hurt readability.
+"evaluation/build_gold.py" = ["E501"]

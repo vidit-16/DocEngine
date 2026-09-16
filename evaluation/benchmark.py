@@ -154,10 +154,112 @@ def variant_retriever(
                 scores = _model(reranker, cross=True).predict(
                     [(query, doc.chunks[p].text) for p in candidates]
                 )
-                candidates = [p for _, p in sorted(zip(scores, candidates), key=lambda x: -x[0])]
+                candidates = [
+                    p for _, p in sorted(zip(scores, candidates, strict=True), key=lambda x: -x[0])
+                ]
             return [doc.chunks[p] for p in candidates[:k]]
 
         return prepare, retrieve
+
+    return factory
+
+
+EXPANSIONS = CACHE / "expansions.json"
+
+EXPAND_PROMPT = """You help search a document. Here is how the document begins:
+
+{opening}
+
+A reader asked: {question}
+
+1. Rewrite the question as a standalone search query that names what "it", "this"
+   or "they" refer to and uses the document's own terminology.
+2. Write one sentence that could plausibly appear in the document and answer it.
+   It does not need to be correct; it is only used to find similar passages.
+
+Reply with JSON only: {{"query": "...", "passage": "..."}}"""
+
+
+def expanded_retriever(
+    base_factory,
+    model: str = "gpt-4o-mini",
+    rerank_union: str | None = None,
+    rerank_against: str = "original",
+):
+    """Retrieve with the original question, a rewritten query and a hypothetical passage.
+
+    Each of the three is retrieved separately and the rankings are fused with RRF.
+    Expansions are cached on disk, keyed by document and question, so a rerun is free.
+    """
+
+    def factory():
+        from openai import OpenAI
+
+        from src.retriever import fuse
+
+        prepare, retrieve = base_factory()
+        cache = json.loads(EXPANSIONS.read_text(encoding="utf-8")) if EXPANSIONS.exists() else {}
+        state = {"client": None, "ledger": None}
+
+        def expand(doc: Document, question: str) -> dict:
+            key = f"{doc.name}::{question}"
+            if key not in cache:
+                if state["client"] is None:
+                    state["client"], state["ledger"] = OpenAI(), Ledger()
+                state["ledger"].check()
+                opening = " ".join(p.text for p in doc.pages[:2])[:1200]
+                response = state["client"].chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": EXPAND_PROMPT.format(opening=opening, question=question),
+                        }
+                    ],
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                state["ledger"].record(model, response.usage)
+                cache[key] = json.loads(response.choices[0].message.content)
+                EXPANSIONS.write_text(
+                    json.dumps(cache, indent=1, ensure_ascii=False), encoding="utf-8"
+                )
+            return cache[key]
+
+        def retrieve_expanded(doc: Document, query: str, k: int) -> list[Chunk]:
+            extra = expand(doc, query)
+            rankings = []
+            for text in (query, extra.get("query", ""), extra.get("passage", "")):
+                if text:
+                    ranked = retrieve(doc, text, max(k, 20))
+                    rankings.append({c.index: rank for rank, c in enumerate(ranked, start=1)})
+            by_index = {c.index: c for c in doc.chunks}
+            if rerank_union:
+                # Candidates come from all three searches; the final order is decided by
+                # the cross-encoder against the reader's own question.
+                union = sorted({i for ranking in rankings for i in ranking})
+                encoder = _model(rerank_union, cross=True)
+                rewritten = extra.get("query") or query
+                if rerank_against == "rewritten":
+                    scores = encoder.predict([(rewritten, by_index[i].text) for i in union])
+                elif rerank_against == "max":
+                    original = encoder.predict([(query, by_index[i].text) for i in union])
+                    standalone = encoder.predict([(rewritten, by_index[i].text) for i in union])
+                    scores = [max(a, b) for a, b in zip(original, standalone, strict=True)]
+                else:
+                    scores = encoder.predict([(query, by_index[i].text) for i in union])
+                order = [i for _, i in sorted(zip(scores, union, strict=True), key=lambda x: -x[0])]
+                return [by_index[i] for i in order[:k]]
+            merged = rankings[0]
+            for other in rankings[1:]:
+                merged = {
+                    position: rank
+                    for rank, (position, *_) in enumerate(fuse(merged, other, 60), start=1)
+                }
+            order = sorted(merged, key=merged.get)
+            return [by_index[i] for i in order[:k]]
+
+        return prepare, retrieve_expanded
 
     return factory
 
@@ -176,7 +278,60 @@ RETRIEVERS = {
     "e5-small": variant_retriever(E5_SMALL, query_prefix="query: ", passage_prefix="passage: "),
     "minilm-rerank": variant_retriever(MINILM, reranker=MS_MARCO),
     "bge-small-rerank": variant_retriever(BGE_SMALL, query_prefix=BGE_QUERY, reranker=MS_MARCO),
+    "bge-small-rerank-pool60": variant_retriever(
+        BGE_SMALL, query_prefix=BGE_QUERY, reranker=MS_MARCO, pool=60
+    ),
 }
+RETRIEVERS["bge-small-rerank-expand"] = expanded_retriever(RETRIEVERS["bge-small-rerank"])
+
+
+def app_retriever():
+    """Exactly what the app runs: src.retriever.search with reranking and expansions.
+
+    Expansions are read from the same cache the experiments used (and generated
+    with src.llm.expand_query when missing), so dev results can be compared
+    one-to-one with the experiment that chose this configuration.
+    """
+    from src.embedder import embed
+    from src.llm import expand_query
+    from src.retriever import search
+    from src.vector_store import create_index
+
+    cache = json.loads(EXPANSIONS.read_text(encoding="utf-8")) if EXPANSIONS.exists() else {}
+
+    def prepare(doc: Document) -> None:
+        doc.state["index"] = create_index(embed([c.text for c in doc.chunks]))
+
+    def retrieve(doc: Document, query: str, k: int) -> list[Chunk]:
+        key = f"{doc.name}::{query}"
+        if key in cache:
+            extra = [cache[key].get("query", ""), cache[key].get("passage", "")]
+        else:
+            Ledger().check()
+            extra = expand_query(query, " ".join(p.text for p in doc.pages[:2]))
+            cache[key] = {
+                "query": extra[0] if extra else "",
+                "passage": extra[1] if len(extra) > 1 else "",
+            }
+            EXPANSIONS.write_text(json.dumps(cache, indent=1, ensure_ascii=False), encoding="utf-8")
+        results = search(
+            query, doc.chunks, index=doc.state["index"], k=k, rerank=True, extra_queries=extra
+        )
+        return [r.chunk for r in results]
+
+    return prepare, retrieve
+
+
+RETRIEVERS["app"] = app_retriever
+RETRIEVERS["bge-small-expand-rerank"] = expanded_retriever(
+    variant_retriever(BGE_SMALL, query_prefix=BGE_QUERY), rerank_union=MS_MARCO
+)
+for _against in ("rewritten", "max"):
+    RETRIEVERS[f"bge-small-expand-rerank-{_against}"] = expanded_retriever(
+        variant_retriever(BGE_SMALL, query_prefix=BGE_QUERY),
+        rerank_union=MS_MARCO,
+        rerank_against=_against,
+    )
 
 
 # ── retrieval scoring ────────────────────────────────────────────────────────
@@ -200,7 +355,9 @@ def score_retrieval(docs: dict[str, Document], questions: list[dict], retriever:
         n = len(rows)
         out = {"n": n}
         for k in K_VALUES:
-            out[f"recall@{k}"] = sum(r["first_hit"] is not None and r["first_hit"] <= k for r in rows) / n
+            out[f"recall@{k}"] = (
+                sum(r["first_hit"] is not None and r["first_hit"] <= k for r in rows) / n
+            )
         out["mrr"] = sum(1 / r["first_hit"] for r in rows if r["first_hit"]) / n
         return out
 
@@ -284,8 +441,14 @@ def judge(client, ledger: Ledger, model: str, question: dict, answer: str) -> tu
     ledger.check()
     response = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": JUDGE_PROMPT.format(
-            question=question["question"], reference=question["answer"], answer=answer)}],
+        messages=[
+            {
+                "role": "user",
+                "content": JUDGE_PROMPT.format(
+                    question=question["question"], reference=question["answer"], answer=answer
+                ),
+            }
+        ],
         temperature=0,
         response_format={"type": "json_object"},
     )
@@ -303,11 +466,15 @@ def rejudge(path: Path, judge_model: str = "gpt-4.1-mini") -> dict:
     gold = {q["id"]: q for q in load_gold("all")}
     for row in result["rows"]:
         if row["kind"] != "unanswerable" and not row["abstained"]:
-            row["correct"], row["judge_reason"] = judge(client, ledger, judge_model, gold[row["id"]], row["answer"])
+            row["correct"], row["judge_reason"] = judge(
+                client, ledger, judge_model, gold[row["id"]], row["answer"]
+            )
     answerable = [r for r in result["rows"] if r["kind"] != "unanswerable"]
     result["summary"]["correct"] = sum(r["correct"] for r in answerable) / len(answerable)
     retrieved = [r for r in answerable if r["retrieved_gold"]]
-    result["summary"]["correct_when_retrieved"] = sum(r["correct"] for r in retrieved) / len(retrieved)
+    result["summary"]["correct_when_retrieved"] = sum(r["correct"] for r in retrieved) / len(
+        retrieved
+    )
     for kind in ("lexical", "paraphrase"):
         rows = [r for r in answerable if r["kind"] == kind]
         if rows:
@@ -338,7 +505,13 @@ def score_answers(docs, questions, retriever, answer_model, judge_model, generat
         seconds = time.perf_counter() - start
         if usage is not None:
             ledger.record(answer_model, usage)
-        row = {"id": q["id"], "doc": q["doc"], "kind": q["kind"], "answer": answer, "seconds": seconds}
+        row = {
+            "id": q["id"],
+            "doc": q["doc"],
+            "kind": q["kind"],
+            "answer": answer,
+            "seconds": seconds,
+        }
         if q["kind"] == "unanswerable":
             row["abstained"] = is_abstention(answer)
         else:
@@ -349,15 +522,21 @@ def score_answers(docs, questions, retriever, answer_model, judge_model, generat
             row["cites_gold"] = bool(cited & gold)
             row["citation_precision"] = len(cited & gold) / len(cited) if cited else None
             row["correct"], row["judge_reason"] = (
-                (False, "abstained") if row["abstained"] else judge(client, ledger, judge_model, q, answer)
+                (False, "abstained")
+                if row["abstained"]
+                else judge(client, ledger, judge_model, q, answer)
             )
         rows.append(row)
-        print(f"  {q['id']}: {'abstain' if row['abstained'] else ''} "
-              f"{'correct' if row.get('correct') else ''} (${ledger.spent:.3f})")
+        print(
+            f"  {q['id']}: {'abstain' if row['abstained'] else ''} "
+            f"{'correct' if row.get('correct') else ''} (${ledger.spent:.3f})"
+        )
 
     answerable = [r for r in rows if r["kind"] != "unanswerable"]
     unanswerable = [r for r in rows if r["kind"] == "unanswerable"]
-    precisions = [r["citation_precision"] for r in answerable if r["citation_precision"] is not None]
+    precisions = [
+        r["citation_precision"] for r in answerable if r["citation_precision"] is not None
+    ]
 
     def rate(items, key):
         return sum(bool(r[key]) for r in items) / len(items) if items else 0.0
@@ -369,7 +548,9 @@ def score_answers(docs, questions, retriever, answer_model, judge_model, generat
         "summary": {
             "answerable": len(answerable),
             "correct": rate(answerable, "correct"),
-            "correct_when_retrieved": rate([r for r in answerable if r["retrieved_gold"]], "correct"),
+            "correct_when_retrieved": rate(
+                [r for r in answerable if r["retrieved_gold"]], "correct"
+            ),
             "retrieved_gold": rate(answerable, "retrieved_gold"),
             "cites_gold": rate(answerable, "cites_gold"),
             "citation_precision": statistics.mean(precisions) if precisions else 0.0,
@@ -401,7 +582,9 @@ def app_generate(model: str):
 
     def generate(question: dict, chunks: list[Chunk]):
         captured.pop("usage", None)
-        results = [Retrieved(chunk=c, score=0.0, keyword_rank=None, semantic_rank=None) for c in chunks]
+        results = [
+            Retrieved(chunk=c, score=0.0, keyword_rank=None, semantic_rank=None) for c in chunks
+        ]
         answer = generate_answer(question["question"], results, model=model)
         return answer, captured.get("usage")
 
@@ -436,9 +619,12 @@ def main() -> None:
     if args.mode == "retrieval":
         result = score_retrieval(docs, questions, args.retriever)
     else:
-        result = score_answers(docs, questions, args.retriever, args.model, args.judge,
-                               app_generate(args.model))
-    (RESULTS / f"{name}.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        result = score_answers(
+            docs, questions, args.retriever, args.model, args.judge, app_generate(args.model)
+        )
+    (RESULTS / f"{name}.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     print(json.dumps(result["summary"], indent=2))
     if "misses" in result:
         print("misses:", " ".join(result["misses"]))

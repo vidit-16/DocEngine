@@ -19,8 +19,8 @@ COPY --chown=app:app assets ./assets
 COPY --chown=app:app .streamlit ./.streamlit
 
 USER app
-# Bake the embedding model into the image so the first upload does not download it.
-RUN python -c "from src.embedder import get_model; get_model()"
+# Bake the embedding and reranking models into the image so the first question does not download them.
+RUN python -c "from src.embedder import get_model; from src.reranker import get_model as reranker; get_model(); reranker()"
 
 EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

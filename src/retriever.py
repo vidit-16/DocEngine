@@ -53,6 +53,9 @@ where why how me my we our you your he him his she her they them their i
 
 RRF_K = 60  # standard damping constant; larger flattens the rank weighting
 
+# How deep each query's (reranked) ranking goes before rankings are fused.
+RERANKED_DEPTH = 20
+
 # How many passages to retrieve and hand to the model by default.
 #
 # Chosen by measurement, not taste. On the paraphrase question set, recall rises
@@ -142,21 +145,10 @@ def fuse(
     ]
 
 
-def search(
-    query: str,
-    chunks: list[Chunk],
-    index=None,
-    k: int = DEFAULT_K,
-    pool: int = 30,
-) -> list[Retrieved]:
-    """Retrieve the k chunks most likely to answer the query.
-
-    `index` is optional: without it the search is keyword-only, which is what
-    makes this function testable without loading an embedding model.
-    """
-    if not chunks or not query.strip():
-        return []
-
+def _candidates(
+    query: str, chunks: list[Chunk], index, pool: int
+) -> tuple[list[int], dict[int, int], dict[int, int], dict[int, float]]:
+    """Keyword and semantic rankings for one query, fused. Returns positions best first."""
     keyword = _ranks(keyword_scores(query, chunks), pool)
 
     semantic: dict[int, int] = {}
@@ -164,18 +156,82 @@ def search(
         from src.embedder import embed
         from src.vector_store import search_index
 
-        hits = search_index(index, embed([query])[0], pool)
+        hits = search_index(index, embed([query], query=True)[0], pool)
         semantic = {position: rank for rank, (position, _) in enumerate(hits, start=1)}
 
-    if not keyword and not semantic:
+    fused = fuse(keyword, semantic, pool)
+    return (
+        [position for position, *_ in fused],
+        keyword,
+        semantic,
+        {position: score for position, score, *_ in fused},
+    )
+
+
+def search(
+    query: str,
+    chunks: list[Chunk],
+    index=None,
+    k: int = DEFAULT_K,
+    pool: int = 30,
+    rerank: bool = False,
+    extra_queries: tuple[str, ...] | list[str] = (),
+) -> list[Retrieved]:
+    """Retrieve the k chunks most likely to answer the query.
+
+    `index` is optional: without it the search is keyword-only, which is what
+    makes this function testable without loading an embedding model.
+
+    `rerank` reorders each query's candidates with a cross-encoder
+    (src/reranker.py). `extra_queries` are alternative phrasings of the same
+    question, such as a standalone rewrite and a hypothetical answer passage
+    (src/llm.expand_query). Each is searched, and reranked if asked, on its own;
+    the resulting rankings are then fused with RRF. Questions worded unlike the
+    document ("How does it cope when the objective keeps changing?") often
+    miss on their own wording but hit on a rewrite, while fusing keeps the
+    original question's strongest matches near the top.
+    """
+    if not chunks or not query.strip():
         return []
 
+    order, keyword, semantic, fused_scores = _candidates(query, chunks, index, pool)
+    queries = [query, *(q for q in extra_queries if q and q.strip())]
+    if not order and len(queries) == 1:
+        return []
+
+    if not rerank and len(queries) == 1:
+        return [
+            Retrieved(
+                chunk=chunks[position],
+                score=fused_scores[position],
+                keyword_rank=keyword.get(position),
+                semantic_rank=semantic.get(position),
+            )
+            for position in order[:k]
+        ]
+
+    rankings = []
+    for text in queries:
+        positions = order if text is query else _candidates(text, chunks, index, pool)[0]
+        if rerank and positions:
+            from src.reranker import rerank as score_passages
+
+            scores = score_passages(text, [chunks[p].text for p in positions])
+            ranked = sorted(zip(scores, positions, strict=True), key=lambda pair: -pair[0])
+            positions = [position for _, position in ranked]
+        rankings.append(positions[:RERANKED_DEPTH])
+
+    combined: dict[int, float] = defaultdict(float)
+    for ranking in rankings:
+        for rank, position in enumerate(ranking, start=1):
+            combined[position] += 1.0 / (RRF_K + rank)
+    ordered = sorted(combined.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
     return [
         Retrieved(
             chunk=chunks[position],
             score=score,
-            keyword_rank=keyword_rank,
-            semantic_rank=semantic_rank,
+            keyword_rank=keyword.get(position),
+            semantic_rank=semantic.get(position),
         )
-        for position, score, keyword_rank, semantic_rank in fuse(keyword, semantic, k)
+        for position, score in ordered
     ]
