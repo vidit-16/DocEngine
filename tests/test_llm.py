@@ -119,7 +119,7 @@ def test_an_empty_completion_does_not_crash(client):
 
 def test_a_transport_failure_becomes_a_named_error(client):
     client(error=RuntimeError("connection reset"))
-    with pytest.raises(AnswerError, match="Model request failed"):
+    with pytest.raises(AnswerError, match="could not be generated"):
         generate_answer("q", make_results(("text", 1)))
 
 

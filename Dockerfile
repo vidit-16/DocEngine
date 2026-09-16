@@ -15,6 +15,8 @@ RUN pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2
 
 COPY --chown=app:app src ./src
 COPY --chown=app:app app.py .
+COPY --chown=app:app assets ./assets
+COPY --chown=app:app .streamlit ./.streamlit
 
 USER app
 # Bake the embedding model into the image so the first upload does not download it.

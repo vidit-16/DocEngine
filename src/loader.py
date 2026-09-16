@@ -44,7 +44,7 @@ def load_pdf(file_bytes: bytes) -> list[Page]:
     otherwise become an empty chunk that can still be retrieved.
     """
     if not file_bytes:
-        raise DocumentError("The uploaded file is empty.")
+        raise DocumentError("The file is empty.")
 
     pages: list[Page] = []
     try:
@@ -56,10 +56,13 @@ def load_pdf(file_bytes: bytes) -> list[Page]:
     except Exception as exc:
         # pdfplumber surfaces damaged or non-PDF input as a variety of parser
         # exceptions; the user only needs to know the file could not be read.
-        raise DocumentError(f"Could not read this file as a PDF ({type(exc).__name__}).") from exc
+        raise DocumentError(
+            f"This file could not be read as a PDF ({type(exc).__name__})."
+        ) from exc
 
     if not pages:
         raise EmptyDocumentError(
-            "No extractable text found. If this is a scanned PDF it needs OCR first."
+            "This PDF contains no readable text. It may be a scanned image, "
+            "and text recognition (OCR) is not supported."
         )
     return pages
