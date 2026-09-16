@@ -96,6 +96,11 @@ def test_a_pdf_with_no_text_raises_rather_than_returning_empty(monkeypatch):
     import src.loader as loader
 
     class FakePage:
+        chars: list = []
+
+        def filter(self, _predicate):
+            return self
+
         def extract_text(self, **kwargs):
             return None
 
@@ -119,6 +124,11 @@ def test_pages_without_text_are_skipped_but_numbering_is_preserved(monkeypatch):
     import src.loader as loader
 
     class FakePage:
+        chars: list = []
+
+        def filter(self, _predicate):
+            return self
+
         def __init__(self, text):
             self.text = text
 
@@ -151,6 +161,11 @@ def test_the_space_tolerance_is_passed_to_pdfplumber(monkeypatch):
     seen = {}
 
     class FakePage:
+        chars: list = []
+
+        def filter(self, _predicate):
+            return self
+
         def extract_text(self, **kwargs):
             seen.update(kwargs)
             return "some text"

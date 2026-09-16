@@ -22,6 +22,12 @@ import pdfplumber
 X_TOLERANCE = float(os.getenv("DOCENGINE_X_TOLERANCE", "1.5"))
 
 
+# Gap, in points, between two rotated characters on the same line that counts
+# as a word break. Rotated text is rebuilt by hand (see _rotated_text), so this
+# plays the role X_TOLERANCE plays for upright text.
+ROTATED_GAP = 1.0
+
+
 @dataclass(frozen=True)
 class Page:
     number: int  # 1-based, as a reader would count them
@@ -34,6 +40,52 @@ class DocumentError(ValueError):
 
 class EmptyDocumentError(DocumentError):
     """Raised when a PDF yields no extractable text."""
+
+
+def _is_rotated_char(obj: dict) -> bool:
+    return obj.get("object_type") == "char" and not obj.get("upright", True)
+
+
+def _rotated_text(chars: list[dict]) -> str:
+    """Rebuild text set at 90 degrees, which pdfplumber returns reversed.
+
+    Landscape figures and sidebars are drawn rotated. pdfplumber reads their
+    characters in page order, which for rotated text is backwards and without
+    word breaks ("gnitsettuoba" for "about testing"). Each rotated line shares
+    one x position, so characters are grouped into lines by x and ordered along
+    the rotated baseline. The text matrix says which way the text runs.
+    """
+    if not chars:
+        return ""
+    lines: dict[int, list[dict]] = {}
+    for char in chars:
+        lines.setdefault(round(char["x0"]), []).append(char)
+
+    counter_clockwise = chars[0].get("matrix", (0, 1))[1] > 0
+    rendered = []
+    for x in sorted(lines, reverse=not counter_clockwise):
+        ordered = sorted(lines[x], key=lambda c: -c["bottom"] if counter_clockwise else c["top"])
+        text, previous = "", None
+        for char in ordered:
+            if previous is not None:
+                gap = (
+                    previous["top"] - char["bottom"]
+                    if counter_clockwise
+                    else char["top"] - previous["bottom"]
+                )
+                if gap > ROTATED_GAP:
+                    text += " "
+            text += char["text"]
+            previous = char
+        rendered.append(text)
+    return "\n".join(rendered)
+
+
+def _page_text(page) -> str:
+    upright = page.filter(lambda obj: not _is_rotated_char(obj))
+    text = upright.extract_text(x_tolerance=X_TOLERANCE) or ""
+    rotated = _rotated_text([char for char in page.chars if _is_rotated_char(char)])
+    return f"{text}\n{rotated}".strip() if rotated else text
 
 
 def load_pdf(file_bytes: bytes) -> list[Page]:
@@ -50,7 +102,7 @@ def load_pdf(file_bytes: bytes) -> list[Page]:
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for number, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text(x_tolerance=X_TOLERANCE)
+                text = _page_text(page)
                 if text and text.strip():
                     pages.append(Page(number=number, text=text))
     except Exception as exc:
