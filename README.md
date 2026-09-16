@@ -154,11 +154,22 @@ grounded answer and a confident guess look identical.
 
 ```bash
 pip install -r requirements.txt
-export OPENAI_API_KEY=sk-...
+cp .env.example .env        # then put your key in OPENAI_API_KEY
 streamlit run app.py
 ```
 
-The model name can be overridden with `DOCENGINE_MODEL`.
+The key can also come from an ordinary environment variable. The model name can be
+overridden with `DOCENGINE_MODEL`.
+
+With Docker (the embedding model is baked into the image):
+
+```bash
+docker build -t docengine .
+docker run -p 8501:8501 --env-file .env docengine     # http://localhost:8501
+```
+
+Unreadable uploads (empty files, non-PDFs, damaged PDFs, scanned PDFs with no text
+layer) are reported in the UI rather than raised as a traceback.
 
 ## Evaluation
 
@@ -173,6 +184,19 @@ refuses to run if the gold set and the document have drifted apart.
 
 `--skip-semantic` measures legacy and keyword only, without loading a model.
 
+### Answer models
+
+```bash
+python evaluation/answer_ab.py
+```
+
+Holds retrieval fixed and compares answer models (`gpt-4o-mini`, `gpt-4.1-mini`,
+`gpt-4.1-nano` by default) on the same passages. Each answer is scored on whether it
+cites a page the evidence is actually on, and on whether it abstains for three
+off-document control questions, where any other reply is an answer from outside
+knowledge. Writes `evaluation/ANSWER_AB.md`. This one makes real API calls, a few
+cents with the default models.
+
 ## Tests
 
 ```bash
@@ -180,10 +204,19 @@ pip install -r requirements-test.txt
 pytest
 ```
 
-59 tests, no API key and no network. The embedding model is replaced with a
+89 tests, no API key and no network. The embedding model is replaced with a
 deterministic bag-of-words vectoriser and the OpenAI client with a stub, so the
 suite installs about 50MB rather than the roughly 2GB a torch stack needs, and
 runs in well under a second.
+
+**Mutation testing.** `python scripts/mutation_test.py` changes the chunker, retriever,
+loader and answer module one operator or constant at a time and re-runs the suite
+for each change. **55 of 56 mutants are killed (98.2%)**, and CI runs it on every push.
+The first run killed 50%: the overlap test used a repeating string, so it passed
+with overlap switched off, and nothing pinned the fusion formula, the keyword score
+or the short-tail threshold. `tests/test_boundaries.py` closes those. The one
+survivor is equivalent: removing a `not` in an early return for "no matches" leaves
+fusion to return the same empty list.
 
 That split is deliberate: `requirements.txt` is what the app needs,
 `requirements-test.txt` is what the tests need. If a test ever starts needing
@@ -202,7 +235,11 @@ stubbing.
 │   ├── vector_store.py    # FAISS inner-product index
 │   ├── retriever.py       # keyword + semantic, fused
 │   └── llm.py             # answer generation with page citations
+├── evaluation/            # retrieval eval, answer-model A/B, gold question sets
+├── scripts/mutation_test.py
 ├── tests/
+├── Dockerfile
+├── .env.example
 └── .github/workflows/ci.yml
 ```
 
@@ -217,7 +254,8 @@ stubbing.
   that ignores the query, not enough to separate two good ones with confidence.
 - Relevance is approximated by an evidence substring appearing in a retrieved
   chunk, so recall is an upper bound on usefulness.
-- Answer quality is not measured, only retrieval — the half that was broken.
+- Answer quality is measured only by citation grounding and abstention
+  (`evaluation/answer_ab.py`), not by judging whether the answer is correct.
 
 ## License
 

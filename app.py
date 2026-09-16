@@ -1,9 +1,16 @@
 import streamlit as st
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional: plain environment variables work without it
+    pass
+else:
+    load_dotenv()
+
 from src.chunker import chunk_pages
 from src.embedder import embed
 from src.llm import AnswerError, generate_answer
-from src.loader import EmptyDocumentError, load_pdf
+from src.loader import DocumentError, load_pdf
 from src.retriever import DEFAULT_K, search
 from src.vector_store import create_index
 
@@ -28,7 +35,7 @@ if uploaded:
     try:
         with st.spinner("Reading and indexing the document..."):
             pages, chunks, index = build_pipeline(file_bytes)
-    except EmptyDocumentError as exc:
+    except DocumentError as exc:
         st.error(str(exc))
         st.stop()
 

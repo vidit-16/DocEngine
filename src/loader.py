@@ -28,7 +28,11 @@ class Page:
     text: str
 
 
-class EmptyDocumentError(ValueError):
+class DocumentError(ValueError):
+    """Raised when an upload cannot be read as a document."""
+
+
+class EmptyDocumentError(DocumentError):
     """Raised when a PDF yields no extractable text."""
 
 
@@ -39,12 +43,20 @@ def load_pdf(file_bytes: bytes) -> list[Page]:
     scanned pages with no text layer are common, and an empty page would
     otherwise become an empty chunk that can still be retrieved.
     """
+    if not file_bytes:
+        raise DocumentError("The uploaded file is empty.")
+
     pages: list[Page] = []
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for number, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text(x_tolerance=X_TOLERANCE)
-            if text and text.strip():
-                pages.append(Page(number=number, text=text))
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for number, page in enumerate(pdf.pages, start=1):
+                text = page.extract_text(x_tolerance=X_TOLERANCE)
+                if text and text.strip():
+                    pages.append(Page(number=number, text=text))
+    except Exception as exc:
+        # pdfplumber surfaces damaged or non-PDF input as a variety of parser
+        # exceptions; the user only needs to know the file could not be read.
+        raise DocumentError(f"Could not read this file as a PDF ({type(exc).__name__}).") from exc
 
     if not pages:
         raise EmptyDocumentError(
