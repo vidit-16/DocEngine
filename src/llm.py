@@ -63,7 +63,7 @@ def build_context(results: list[Retrieved]) -> str:
     )
 
 
-def generate_answer(query: str, results: list[Retrieved]) -> str:
+def generate_answer(query: str, results: list[Retrieved], model: str | None = None) -> str:
     """Answer a question from retrieved passages."""
     if not results:
         return "Not clearly found in document"
@@ -74,9 +74,10 @@ def generate_answer(query: str, results: list[Retrieved]) -> str:
         "Answer using only the passages above, citing page numbers."
     )
 
+    model = model or MODEL
     try:
         response = get_client().chat.completions.create(
-            model=MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -86,6 +87,6 @@ def generate_answer(query: str, results: list[Retrieved]) -> str:
     except AnswerError:
         raise
     except Exception as exc:
-        raise AnswerError(f"Model request failed ({MODEL}): {exc}") from exc
+        raise AnswerError(f"Model request failed ({model}): {exc}") from exc
 
     return (response.choices[0].message.content or "").strip()

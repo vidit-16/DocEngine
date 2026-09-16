@@ -157,3 +157,11 @@ def test_the_model_is_not_loaded_at_import():
     module = importlib.import_module("src.embedder")
     importlib.reload(module)
     assert module._model is None
+
+
+def test_model_can_be_chosen_per_call(client):
+    fake = client()
+    generate_answer("q", make_results(("text", 1)), model="gpt-4.1-nano")
+    assert fake.calls[-1]["model"] == "gpt-4.1-nano"
+    generate_answer("q", make_results(("text", 1)))
+    assert fake.calls[-1]["model"] == llm.MODEL
