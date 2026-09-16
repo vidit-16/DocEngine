@@ -8,6 +8,11 @@ only those passages.
 
 Live demo: https://doc--engine.streamlit.app/
 
+<p align="center">
+  <img src="docs/screenshots/docengine.png" alt="Answer with page citations and the retrieved passages" width="85%">
+</p>
+<p align="center"><em>The Adam paper, 130 passages indexed. The answer cites pages 3 and 5, and each retrieved passage shows its page and whether keyword search, semantic search or both found it.</em></p>
+
 ## The pipeline
 
 ```text
