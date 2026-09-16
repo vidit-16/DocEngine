@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from dataclasses import dataclass
 
 import pdfplumber
@@ -117,4 +118,48 @@ def load_pdf(file_bytes: bytes) -> list[Page]:
             "This PDF contains no readable text. It may be a scanned image, "
             "and text recognition (OCR) is not supported."
         )
-    return pages
+    return clean_pages(pages)
+
+
+_UNMAPPED_GLYPH = re.compile(r"\(cid:\d+\)")
+_LINE_BREAK_HYPHEN = re.compile(r"([A-Za-z]+)-\n([a-z]+)")
+_WORD = re.compile(r"[A-Za-z]+")
+_COMPOUND = re.compile(r"[A-Za-z]+-[A-Za-z]+")
+
+
+def clean_pages(pages: list[Page]) -> list[Page]:
+    """Remove extraction artefacts that break both keyword and semantic matching.
+
+    - ``(cid:NN)`` placeholders pdfplumber emits for glyphs it cannot map.
+    - Words hyphenated across a line break ("man-\\nagement"). Typeset reports
+      are full of them (233 in the NIST AI RMF), and each one turns a word the
+      question uses into two fragments neither retriever can match.
+
+    Whether to join is decided from the document's own vocabulary, so genuine
+    compounds that happen to wrap ("third-\\nparty") keep their hyphen:
+      1. the hyphenated form appears elsewhere in the document -> keep it
+      2. the joined word appears elsewhere                      -> join
+      3. both halves are words the document uses                -> keep it
+      4. otherwise (a syllable split such as "en-\\nergy")        -> join
+    """
+    texts = [_UNMAPPED_GLYPH.sub("", page.text) for page in pages]
+    # The vocabulary must exclude the fragments being judged, or every
+    # fragment ("recommenda", "tions") would count as a word the document uses.
+    flat = " ".join(_LINE_BREAK_HYPHEN.sub(" ", text) for text in texts)
+    words = {w.lower() for w in _WORD.findall(flat)}
+    compounds = {c.lower() for c in _COMPOUND.findall(flat)}
+
+    def repair(match: re.Match) -> str:
+        head, tail = match.group(1), match.group(2)
+        if f"{head}-{tail}".lower() in compounds:
+            return f"{head}-{tail}"
+        if (head + tail).lower() in words:
+            return head + tail
+        if head.lower() in words and tail.lower() in words and len(head) > 2:
+            return f"{head}-{tail}"
+        return head + tail
+
+    return [
+        Page(number=page.number, text=_LINE_BREAK_HYPHEN.sub(repair, text))
+        for page, text in zip(pages, texts, strict=True)
+    ]

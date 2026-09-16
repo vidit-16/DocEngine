@@ -111,7 +111,72 @@ def hybrid_retriever():
     return prepare, retrieve
 
 
-RETRIEVERS = {"hybrid": hybrid_retriever}
+_MODELS: dict = {}
+
+
+def _model(name: str, cross: bool = False):
+    if name not in _MODELS:
+        from sentence_transformers import CrossEncoder, SentenceTransformer
+
+        _MODELS[name] = CrossEncoder(name) if cross else SentenceTransformer(name)
+    return _MODELS[name]
+
+
+def variant_retriever(
+    embedding: str,
+    query_prefix: str = "",
+    passage_prefix: str = "",
+    reranker: str | None = None,
+    keyword: bool = True,
+    pool: int = 30,
+):
+    """Keyword + dense retrieval fused with RRF, optionally reranked by a cross-encoder."""
+
+    def factory():
+        import numpy as np
+
+        from src.retriever import _ranks, fuse, keyword_scores
+        from src.vector_store import create_index, search_index
+
+        def encode(texts: list[str]):
+            vectors = _model(embedding).encode(texts, normalize_embeddings=True, batch_size=32)
+            return np.asarray(vectors, dtype="float32")
+
+        def prepare(doc: Document) -> None:
+            doc.state["index"] = create_index(encode([passage_prefix + c.text for c in doc.chunks]))
+
+        def retrieve(doc: Document, query: str, k: int) -> list[Chunk]:
+            dense = search_index(doc.state["index"], encode([query_prefix + query])[0], pool)
+            semantic = {position: rank for rank, (position, _) in enumerate(dense, start=1)}
+            lexical = _ranks(keyword_scores(query, doc.chunks), pool) if keyword else {}
+            candidates = [position for position, *_ in fuse(lexical, semantic, pool)]
+            if reranker and candidates:
+                scores = _model(reranker, cross=True).predict(
+                    [(query, doc.chunks[p].text) for p in candidates]
+                )
+                candidates = [p for _, p in sorted(zip(scores, candidates), key=lambda x: -x[0])]
+            return [doc.chunks[p] for p in candidates[:k]]
+
+        return prepare, retrieve
+
+    return factory
+
+
+MINILM = "sentence-transformers/all-MiniLM-L6-v2"
+BGE_SMALL = "BAAI/bge-small-en-v1.5"
+BGE_QUERY = "Represent this sentence for searching relevant passages: "
+E5_SMALL = "intfloat/e5-small-v2"
+MS_MARCO = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+RETRIEVERS = {
+    "hybrid": hybrid_retriever,
+    "minilm": variant_retriever(MINILM),
+    "minilm-dense": variant_retriever(MINILM, keyword=False),
+    "bge-small": variant_retriever(BGE_SMALL, query_prefix=BGE_QUERY),
+    "e5-small": variant_retriever(E5_SMALL, query_prefix="query: ", passage_prefix="passage: "),
+    "minilm-rerank": variant_retriever(MINILM, reranker=MS_MARCO),
+    "bge-small-rerank": variant_retriever(BGE_SMALL, query_prefix=BGE_QUERY, reranker=MS_MARCO),
+}
 
 
 # ── retrieval scoring ────────────────────────────────────────────────────────
@@ -191,10 +256,18 @@ Question: {question}
 Reference answer: {reference}
 Answer to grade: {answer}
 
-Is the answer to grade correct? It is correct if it states the key facts of the
-reference answer without contradicting it. Extra detail is fine if it is not
-wrong. Missing the central fact, giving a different value, or declining to
-answer is incorrect. Ignore page citations and wording.
+Is the answer to grade correct? Judge strictly:
+- It must directly answer the question that was asked. Related facts that do not
+  state the answer (for example, listing figures without drawing the conclusion
+  the question asks for) are incorrect.
+- It must contain the central fact of the reference answer and must not
+  contradict it. The reference may add secondary details (ranges, related
+  figures, follow-on steps); omitting those is fine. Extra detail in the answer
+  is fine only if it is not wrong.
+- An answer that contradicts itself is incorrect.
+- A different value, a different entity, answering a neighbouring question, or
+  declining to answer is incorrect.
+- Ignore page citations, formatting and wording.
 
 Reply with JSON only: {{"correct": true or false, "reason": "<one short sentence>"}}"""
 
@@ -219,6 +292,29 @@ def judge(client, ledger: Ledger, model: str, question: dict, answer: str) -> tu
     ledger.record(model, response.usage)
     verdict = json.loads(response.choices[0].message.content)
     return bool(verdict.get("correct")), verdict.get("reason", "")
+
+
+def rejudge(path: Path, judge_model: str = "gpt-4.1-mini") -> dict:
+    """Re-grade saved answers with the current judge prompt, without regenerating them."""
+    from openai import OpenAI
+
+    client, ledger = OpenAI(), Ledger()
+    result = json.loads(path.read_text(encoding="utf-8"))
+    gold = {q["id"]: q for q in load_gold("all")}
+    for row in result["rows"]:
+        if row["kind"] != "unanswerable" and not row["abstained"]:
+            row["correct"], row["judge_reason"] = judge(client, ledger, judge_model, gold[row["id"]], row["answer"])
+    answerable = [r for r in result["rows"] if r["kind"] != "unanswerable"]
+    result["summary"]["correct"] = sum(r["correct"] for r in answerable) / len(answerable)
+    retrieved = [r for r in answerable if r["retrieved_gold"]]
+    result["summary"]["correct_when_retrieved"] = sum(r["correct"] for r in retrieved) / len(retrieved)
+    for kind in ("lexical", "paraphrase"):
+        rows = [r for r in answerable if r["kind"] == kind]
+        if rows:
+            result["summary"][f"correct_{kind}"] = sum(r["correct"] for r in rows) / len(rows)
+    result["spent_usd"] = ledger.spent
+    path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    return result
 
 
 def score_answers(docs, questions, retriever, answer_model, judge_model, generate) -> dict:
@@ -321,7 +417,7 @@ def main() -> None:
     parser.add_argument("--split", default="dev", choices=["dev", "test", "all"])
     parser.add_argument("--retriever", default="hybrid", choices=sorted(RETRIEVERS))
     parser.add_argument("--model", default="gpt-4o-mini")
-    parser.add_argument("--judge", default="gpt-4o-mini")
+    parser.add_argument("--judge", default="gpt-4.1-mini")
     parser.add_argument("--label", default="")
     args = parser.parse_args()
 

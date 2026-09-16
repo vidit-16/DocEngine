@@ -76,3 +76,55 @@ def chunk_pages(
             chunks.append(Chunk(text=piece, page=page.number, index=len(chunks)))
 
     return chunks
+
+
+# A sentence ends at . ? or ! followed by whitespace and an uppercase letter,
+# digit or opening bracket. Common abbreviations are protected so "e.g. The"
+# and "et al. (2014)" do not end a sentence.
+_ABBREVIATIONS = ("e.g.", "i.e.", "et al.", "Fig.", "Figs.", "Eq.", "No.", "vs.", "cf.", "approx.")
+_SENTENCE_END = re.compile(r"(?<=[.?!])\s+(?=[A-Z0-9(\[“\"])")
+
+
+def split_sentences(text: str) -> list[str]:
+    text = _normalise(text)
+    if not text:
+        return []
+    protected = text
+    for abbreviation in _ABBREVIATIONS:
+        protected = protected.replace(abbreviation + " ", abbreviation.replace(".", "") + " ")
+    return [s.replace("", ".").strip() for s in _SENTENCE_END.split(protected) if s.strip()]
+
+
+def chunk_sentences(
+    pages: list[Page],
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap_sentences: int = 1,
+) -> list[Chunk]:
+    """Pack whole sentences into chunks of about ``chunk_size`` characters.
+
+    Character windows cut sentences in half, so the passage that answers a
+    question often holds half the sentence a reader would quote. Here a chunk
+    ends at a sentence boundary and the next one repeats the last sentence.
+    A single sentence longer than ``chunk_size`` becomes its own chunk.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if overlap_sentences < 0:
+        raise ValueError("overlap_sentences cannot be negative")
+
+    chunks: list[Chunk] = []
+    for page in pages:
+        sentences = split_sentences(page.text)
+        start = 0
+        while start < len(sentences):
+            end, length = start, 0
+            while end < len(sentences) and (end == start or length + len(sentences[end]) <= chunk_size):
+                length += len(sentences[end]) + 1
+                end += 1
+            chunks.append(
+                Chunk(text=" ".join(sentences[start:end]), page=page.number, index=len(chunks))
+            )
+            if end >= len(sentences):
+                break
+            start = max(end - overlap_sentences, start + 1)
+    return chunks

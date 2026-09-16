@@ -101,3 +101,30 @@ def test_rotated_text_is_read_forwards_with_word_breaks():
     [page] = load_pdf(make_rotated_pdf("See Appendix A for details"))
     assert "Upright heading" in page.text
     assert "See Appendix A for details" in page.text
+
+
+def test_syllable_splits_across_lines_are_joined():
+    from src.loader import Page, clean_pages
+
+    pages = [Page(1, "risk man-\nagement matters"), Page(2, "good management practice")]
+    assert clean_pages(pages)[0].text == "risk management matters"
+
+
+def test_real_compounds_that_wrap_keep_their_hyphen():
+    from src.loader import Page, clean_pages
+
+    pages = [Page(1, "data from a third-\nparty vendor"), Page(2, "a third-party model")]
+    assert clean_pages(pages)[0].text == "data from a third-party vendor"
+
+
+def test_unknown_split_is_joined_but_word_pairs_are_kept():
+    from src.loader import Page, clean_pages
+
+    pages = [Page(1, "en-\nergy use and high-\nor low risk"), Page(2, "high or low")]
+    assert clean_pages(pages)[0].text == "energy use and high-or low risk"
+
+
+def test_unmapped_glyph_placeholders_are_removed():
+    from src.loader import Page, clean_pages
+
+    assert clean_pages([Page(1, "β(cid:12) = 0.9")])[0].text == "β = 0.9"
