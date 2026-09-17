@@ -12,11 +12,13 @@ from src.embedder import embed
 from src.llm import ABSTAIN, AnswerError, expand_query, generate_answer
 from src.loader import DocumentError, load_pdf
 from src.retriever import DEFAULT_K, search
+from src.ui import answer_card, inject, passage, status
 from src.vector_store import create_index
 
 st.set_page_config(
     page_title="DocEngine | Document Q&A", page_icon="assets/favicon.png", layout="wide"
 )
+inject()
 st.title("Document Q&A")
 st.caption(
     "Upload a PDF and ask questions about it. Answers are drawn only from the "
@@ -45,7 +47,7 @@ if uploaded:
         st.error(str(exc))
         st.stop()
 
-    st.success(f"Ready. {len(pages)} pages read, {len(chunks)} passages indexed.")
+    st.markdown(status(len(pages), len(chunks)), unsafe_allow_html=True)
 
     query = st.text_input("Question", placeholder="What does the document say about ...?")
 
@@ -68,16 +70,17 @@ if uploaded:
             st.error(str(exc))
             st.stop()
 
-        st.subheader("Answer")
         if answer.strip().rstrip(".").lower() == ABSTAIN.lower():
             st.info(
                 "The document does not clearly answer this question. "
                 "The closest passages are listed below."
             )
         else:
-            st.write(answer)
+            st.markdown(answer_card(answer), unsafe_allow_html=True)
 
-        with st.expander(f"Sources: {len(results)} passages"):
+        pages_cited = sorted({item.chunk.page for item in results})
+        label = ", ".join(str(page) for page in pages_cited)
+        with st.expander(f"Sources: {len(results)} passages from pages {label}"):
             for position, item in enumerate(results, start=1):
                 matched_by = []
                 if item.keyword_rank:
@@ -85,10 +88,12 @@ if uploaded:
                 if item.semantic_rank:
                     matched_by.append(f"meaning match (rank {item.semantic_rank})")
 
-                st.markdown(f"**{position}. Page {item.chunk.page}**")
-                st.caption(
+                text = item.chunk.text[:400] + ("..." if len(item.chunk.text) > 400 else "")
+                why = (
                     " and ".join(matched_by)
                     if matched_by
                     else "found through a rephrased version of the question"
                 )
-                st.text(item.chunk.text[:400] + ("..." if len(item.chunk.text) > 400 else ""))
+                st.markdown(
+                    passage(position, item.chunk.page, why, text), unsafe_allow_html=True
+                )
