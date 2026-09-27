@@ -1,8 +1,8 @@
 name: Keep the app awake
 
-# Streamlit Community Cloud sleeps an app after a few days idle, so twice a day
-# is plenty to keep it awake. Times are UTC and deliberately off the hour, since
-# GitHub delays jobs scheduled on the hour.
+# Streamlit Community Cloud sleeps an app after about 12 hours without a
+# visitor, so twice a day keeps it awake. Times are UTC and deliberately off the
+# hour, since GitHub delays jobs scheduled on the hour.
 on:
   schedule:
     - cron: "23 7,19 * * *"
@@ -11,22 +11,52 @@ on:
 permissions: {}
 
 jobs:
-  ping:
+  visit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Request the app
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install a headless browser
         run: |
-          # Streamlit Community Cloud answers the first request with a 303 to
-          # /-/login and serves the app only once a session cookie is set, so
-          # the cookie jar is required: without it curl follows that redirect
-          # until it gives up.
-          for attempt in 1 2 3; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 120 -L --max-redirs 10 -c jar.txt -b jar.txt "$URL" || echo 000)
-            echo "attempt $attempt: HTTP $code"
-            if [ "$code" = "200" ]; then exit 0; fi
-            sleep 30
-          done
-          echo "::error::$URL did not return 200 after three attempts"
-          exit 1
+          pip install --quiet playwright==1.47.0
+          python -m playwright install --with-deps chromium
+
+      # A plain HTTP request does not count as a visit: a sleeping app answers
+      # it with 200 and its "gone to sleep" page, so a curl check passes while
+      # the app stays asleep. Only a browser that runs the page and opens the
+      # app's websocket counts, and waking a sleeping app takes a button press.
+      - name: Open the app in the browser
+        shell: python
+        run: |
+          import os, sys
+          from playwright.sync_api import TimeoutError, sync_playwright
+
+          url = os.environ["URL"]
+          with sync_playwright() as p:
+              page = p.chromium.launch().new_page()
+              page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+
+              wake = page.get_by_role("button", name="Yes, get this app back up!")
+              try:
+                  wake.wait_for(timeout=20_000)
+              except TimeoutError:
+                  print("the app was awake")
+              else:
+                  wake.click()
+                  print("the app was asleep; woke it")
+
+              # The app itself runs in an iframe; it has loaded once Streamlit
+              # has rendered its root element inside it.
+              app = page.frame_locator("iframe[title='streamlitApp']").locator("[data-testid='stApp']")
+              try:
+                  app.wait_for(timeout=300_000)
+              except TimeoutError:
+                  print(f"::error::{url} did not load within five minutes")
+                  sys.exit(1)
+              page.wait_for_timeout(10_000)
+              print("the app loaded")
         env:
           URL: https://doc--engine.streamlit.app/
